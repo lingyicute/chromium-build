@@ -1,0 +1,108 @@
+name: Chromium local build segment
+
+on:
+  workflow_call:
+    inputs:
+      stage:
+        required: true
+        type: string
+      artifact-id:
+        required: true
+        type: string
+      sha256:
+        required: true
+        type: string
+    outputs:
+      status:
+        value: ${{ jobs.build.outputs.status }}
+      artifact-id:
+        value: ${{ jobs.build.outputs.artifact-id }}
+      sha256:
+        value: ${{ jobs.build.outputs.sha256 }}
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 350
+    outputs:
+      status: ${{ steps.build.outputs.status }}
+      artifact-id: ${{ steps.upload.outputs.artifact-id }}
+      sha256: ${{ steps.pack.outputs.sha256 }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+          fetch-depth: 1
+      - name: Validate control-plane inputs (never shell-interpolate expressions)
+        env:
+          STAGE: ${{ inputs.stage }}
+          ARTIFACT_ID: ${{ inputs.artifact-id }}
+          EXPECTED_SHA256: ${{ inputs.sha256 }}
+        run: |
+          python3 - <<'PY'
+          import os, re
+          for key, pattern in [('STAGE', r'0[1-8]'), ('ARTIFACT_ID', r'[1-9][0-9]*'), ('EXPECTED_SHA256', r'[0-9a-f]{64}')]:
+              if not re.fullmatch(pattern, os.environ[key]):
+                  raise SystemExit('Invalid ' + key)
+          PY
+      - name: Prepare disposable hosted runner (no apt)
+        run: bash .github/scripts/host.sh
+      - name: Download exact checkpoint ID from this run only
+        timeout-minutes: 70
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          artifact-ids: ${{ inputs.artifact-id }}
+          path: /mnt/chromium-transfer/checkpoint
+          merge-multiple: true
+          digest-mismatch: error
+          # Deliberately omit github-token, repository, run-id and pattern.
+      - name: Verify producer hash, consume chunks, restore tree
+        env:
+          EXPECTED_SHA256: ${{ inputs.sha256 }}
+        run: bash .github/scripts/restore.sh
+      - name: Compile until completion or our orderly checkpoint deadline
+        id: build
+        env:
+          STAGE: ${{ inputs.stage }}
+        run: bash .github/scripts/build.sh
+      - name: Verify APK signature and assemble output
+        if: steps.build.outputs.status == 'completed'
+        run: bash .github/scripts/release.sh
+      - name: Upload APK and build record (not a GitHub Release)
+        if: steps.build.outputs.status == 'completed'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: apk-${{ github.run_id }}-${{ github.run_attempt }}-${{ inputs.stage }}
+          path: ${{ runner.temp }}/chromium-release/
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 14
+      - name: Destructively checkpoint unfinished build
+        if: steps.build.outputs.status == 'running'
+        id: pack
+        timeout-minutes: 45
+        run: bash .github/scripts/pack.sh
+      - name: Upload immutable checkpoint
+        if: steps.build.outputs.status == 'running'
+        id: upload
+        timeout-minutes: 30
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: tree-${{ github.run_id }}-${{ github.run_attempt }}-${{ inputs.stage }}
+          path: /mnt/chromium-transfer/checkpoint/tree.part-*
+          compression-level: 0
+          if-no-files-found: error
+          retention-days: 3
+          overwrite: false
+      - name: Save stage logs
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: logs-${{ github.run_id }}-${{ github.run_attempt }}-${{ inputs.stage }}
+          path: ${{ runner.temp }}/chromium-logs/
+          retention-days: 7
+          if-no-files-found: ignore

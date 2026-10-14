@@ -1,0 +1,166 @@
+name: Chromium Stable Android arm64
+
+on:
+  workflow_dispatch:
+
+# No release pushes, PR writes, OIDC, secrets, or cross-run artifact access.
+permissions:
+  contents: read
+
+concurrency:
+  group: chromium-stable-android
+  cancel-in-progress: false
+
+jobs:
+  prepare:
+    if: github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 350
+    outputs:
+      artifact-id: ${{ steps.upload.outputs.artifact-id }}
+      sha256: ${{ steps.pack.outputs.sha256 }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+          fetch-depth: 1
+      - name: Prepare disposable hosted runner (no apt)
+        run: bash .github/scripts/host.sh
+      - name: Resolve stable, fetch locked source, run upstream hooks, configure
+        id: source
+        timeout-minutes: 245
+        shell: bash
+        run: |
+          set -o pipefail
+          timeout --signal=INT --kill-after=120s 240m bash .github/scripts/fetch.sh 2>&1 \
+            | tee "$RUNNER_TEMP/chromium-logs/prepare.log"
+      - name: Save source resolution and GN configuration
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: source-lock-${{ github.run_id }}-${{ github.run_attempt }}
+          path: /mnt/chromium-relay/metadata/
+          if-no-files-found: error
+          retention-days: 14
+      - name: Destructively export complete tree as checkpoint
+        id: pack
+        timeout-minutes: 50
+        run: bash .github/scripts/pack.sh
+      - name: Upload immutable checkpoint
+        id: upload
+        timeout-minutes: 40
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: tree-${{ github.run_id }}-${{ github.run_attempt }}-00
+          path: /mnt/chromium-transfer/checkpoint/tree.part-*
+          compression-level: 0
+          if-no-files-found: error
+          retention-days: 3
+          overwrite: false
+      - name: Save preparation logs
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: logs-${{ github.run_id }}-${{ github.run_attempt }}-00
+          path: ${{ runner.temp }}/chromium-logs/
+          retention-days: 7
+          if-no-files-found: ignore
+
+  part-01:
+    needs: prepare
+    uses: ./.github/workflows/chromium-stage.yml
+    with:
+      stage: '01'
+      artifact-id: ${{ needs.prepare.outputs.artifact-id }}
+      sha256: ${{ needs.prepare.outputs.sha256 }}
+
+  part-02:
+    needs: part-01
+    if: ${{ needs.part-01.outputs.status == 'running' }}
+    uses: ./.github/workflows/chromium-stage.yml
+    with:
+      stage: '02'
+      artifact-id: ${{ needs.part-01.outputs.artifact-id }}
+      sha256: ${{ needs.part-01.outputs.sha256 }}
+
+  part-03:
+    needs: part-02
+    if: ${{ needs.part-02.outputs.status == 'running' }}
+    uses: ./.github/workflows/chromium-stage.yml
+    with:
+      stage: '03'
+      artifact-id: ${{ needs.part-02.outputs.artifact-id }}
+      sha256: ${{ needs.part-02.outputs.sha256 }}
+
+  part-04:
+    needs: part-03
+    if: ${{ needs.part-03.outputs.status == 'running' }}
+    uses: ./.github/workflows/chromium-stage.yml
+    with:
+      stage: '04'
+      artifact-id: ${{ needs.part-03.outputs.artifact-id }}
+      sha256: ${{ needs.part-03.outputs.sha256 }}
+
+  part-05:
+    needs: part-04
+    if: ${{ needs.part-04.outputs.status == 'running' }}
+    uses: ./.github/workflows/chromium-stage.yml
+    with:
+      stage: '05'
+      artifact-id: ${{ needs.part-04.outputs.artifact-id }}
+      sha256: ${{ needs.part-04.outputs.sha256 }}
+
+  part-06:
+    needs: part-05
+    if: ${{ needs.part-05.outputs.status == 'running' }}
+    uses: ./.github/workflows/chromium-stage.yml
+    with:
+      stage: '06'
+      artifact-id: ${{ needs.part-05.outputs.artifact-id }}
+      sha256: ${{ needs.part-05.outputs.sha256 }}
+
+  part-07:
+    needs: part-06
+    if: ${{ needs.part-06.outputs.status == 'running' }}
+    uses: ./.github/workflows/chromium-stage.yml
+    with:
+      stage: '07'
+      artifact-id: ${{ needs.part-06.outputs.artifact-id }}
+      sha256: ${{ needs.part-06.outputs.sha256 }}
+
+  part-08:
+    needs: part-07
+    if: ${{ needs.part-07.outputs.status == 'running' }}
+    uses: ./.github/workflows/chromium-stage.yml
+    with:
+      stage: '08'
+      artifact-id: ${{ needs.part-07.outputs.artifact-id }}
+      sha256: ${{ needs.part-07.outputs.sha256 }}
+
+  result:
+    needs: [prepare, part-01, part-02, part-03, part-04, part-05, part-06, part-07, part-08]
+    if: always()
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions: {}
+    steps:
+      - name: Fail unless a stage actually completed
+        env:
+          NEEDS_JSON: ${{ toJSON(needs) }}
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import json, os
+          needs = json.loads(os.environ['NEEDS_JSON'])
+          errors = [name for name, job in needs.items() if job['result'] in ('failure', 'cancelled')]
+          complete = any(job.get('outputs', {}).get('status') == 'completed' for job in needs.values())
+          ok = complete and not errors
+          with open(os.environ['GITHUB_STEP_SUMMARY'], 'a') as f:
+              f.write('## Chromium Stable Android arm64\n')
+              f.write('APK completed; see the apk-* artifact.\n' if ok else
+                      'FAILED: no completed APK, or a required stage failed/cancelled. Inspect logs. '
+                      'If all 8 stages ran without finishing, the stage budget was exhausted.\n')
+              f.write('Development signing key only. Not a production release.\n')
+          if not ok:
+              raise SystemExit('No successful final APK artifact. Errors: ' + ', '.join(errors))
+          PY
