@@ -28,7 +28,6 @@ jobs:
       - name: Prepare disposable hosted runner (no apt)
         run: bash .github/scripts/host.sh
       - name: Resolve stable, fetch locked source, run upstream hooks, configure
-        id: source
         timeout-minutes: 245
         shell: bash
         run: |

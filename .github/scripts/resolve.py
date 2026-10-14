@@ -45,8 +45,6 @@ def main():
                 resolved_at=datetime.datetime.now(datetime.timezone.utc).isoformat())
     (meta / 'chromiumdash.json').write_bytes(raw)
     (meta / 'build-lock.json').write_text(json.dumps(lock, indent=2) + '\n')
-    with open(os.environ['GITHUB_OUTPUT'], 'a') as f:
-        f.write(f'version={version}\n')
     print(json.dumps(lock, indent=2))
 
 if __name__ == '__main__':

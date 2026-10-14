@@ -116,10 +116,12 @@ class Checkpoint(unittest.TestCase):
             (src / 'tool').chmod(0o755)
             (src / 'link').symlink_to('tool')
             archive = root / 'test.tar'
-            subprocess.run(['tar', '--format=posix', '--pax-option=delete=atime,delete=ctime',
-                            '--remove-files', '-C', str(src), '-cf', str(archive), '.'], check=True)
-            self.assertFalse(src.exists())
-            src.mkdir()
+            # Same archive form as pack.sh: the entries of the root, never "." itself.
+            subprocess.run(['bash', '-c', 'cd "$1" && shopt -s dotglob && tar --format=posix '
+                            '--pax-option=delete=atime,delete=ctime --remove-files -cf "$2" -- *',
+                            '_', str(src), str(archive)], check=True)
+            self.assertTrue(src.exists())
+            self.assertEqual(list(src.iterdir()), [])
             subprocess.run(['tar', '--no-same-owner', '-xpf', str(archive), '-C', str(src)], check=True)
             self.assertEqual((src / '.ninja_log').stat().st_mtime_ns, ns)
             self.assertEqual((src / '.ninja_log').read_text(), 'state')
@@ -141,8 +143,10 @@ class Deadline(unittest.TestCase):
         self.assertEqual(self.run_command('import os,signal; os.kill(os.getpid(),signal.SIGKILL)'), 'failed:-9')
 
     def test_orderly_deadline(self):
-        code = 'import signal,time,sys; signal.signal(signal.SIGINT,lambda *a:sys.exit(1)); time.sleep(20)'
-        self.assertEqual(self.run_command(code, 0.5), 'running')
+        # ninja <= 1.12 exits 2 after "interrupted by user", ninja >= 1.13 exits 130.
+        for code in (2, 130):
+            script = f'import signal,time,sys; signal.signal(signal.SIGINT,lambda *a:sys.exit({code})); time.sleep(20)'
+            self.assertEqual(self.run_command(script, 0.5), 'running')
 
     def test_unresponsive_deadline(self):
         code = 'import signal,time; signal.signal(signal.SIGINT,signal.SIG_IGN); time.sleep(20)'

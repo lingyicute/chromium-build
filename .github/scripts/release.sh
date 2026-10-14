@@ -11,7 +11,6 @@ export JAVA_HOME="$CR_ROOT/src/third_party/jdk/current"
 "$apksigner" verify --verbose --print-certs "$apk" | tee "$release/apk-signature.txt"
 cp "$apk" "$release/Chromium-Stable-arm64.apk"
 cp -a "$CR_ROOT/metadata" "$release/metadata"
-cp "$GITHUB_WORKSPACE/SECURITY.md" "$release/BUILD-NOTICE.md"
 # SHA256SUMS authenticates nothing on its own; it detects corruption only.
 (cd "$release" && find . -type f ! -name SHA256SUMS -print0 | sort -z | xargs -0 sha256sum > SHA256SUMS)
 echo 'Built and verified Chromium APK (upstream development signing key; NOT production-signed).' >> "$GITHUB_STEP_SUMMARY"

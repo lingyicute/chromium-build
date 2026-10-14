@@ -37,7 +37,7 @@ GCLIENT
 cd "$CR_ROOT"
 # All DEPS and hooks are upstream Chromium's. This is deliberately NOT a
 # network allowlist or a claim that every transitive dependency is first-party.
-gclient sync --nohooks --no-history --shallow --revision "src@$revision" --jobs=4
+gclient sync --nohooks --no-history --revision "src@$revision" --jobs=4
 [[ "$(git -C src rev-parse HEAD)" == "$revision" ]] || fail 'gclient changed source revision'
 python3 - <<'PY'
 import json, os
