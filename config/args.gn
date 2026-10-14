@@ -10,7 +10,7 @@ android_channel = "default"
 # Keep the build local and checkpoint-compatible.
 use_remoteexec = false
 use_siso = false
-android_static_analysis = "on"
+android_static_analysis = "off"  # official builds use "off"; saves lint/ErrorProne time
 
 # Standard-hosted runner resource compromises, NOT security-feature switches.
 symbol_level = 0

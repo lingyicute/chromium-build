@@ -11,7 +11,7 @@
     chromium-stage.yml        # 本仓库内复用的单段 job，不是 composite Action
   scripts/
     common.sh                # 固定绝对路径与工具缓存位置
-    host.sh                  # 临时 VM 清理和资源检查，不安装系统包
+    host.sh                  # 临时 VM 清理、/ 上建 swap、资源检查，不安装系统包
     resolve.py               # 解析一次 Android Stable，验证 JSON
     fetch.sh                 # 源码与工具链锁定、同步、hooks、GN
     checkpoint.py            # 严格摘要检查与分块流恢复
@@ -28,7 +28,7 @@ tests/
 README.md
 ```
 > [!tip]
-> 请不要在个人机器或已有数据的自托管 runner 上执行本项目的 `host.sh` / `pack.sh`。前者删除固定路径下的预装大型软件；后者会在打包成功读取各文件后删除整个本地构建树。
+> 请不要在个人机器或已有数据的自托管 runner 上执行本项目的 `host.sh` / `pack.sh`。前者删除固定路径下的预装大型软件，并关闭、删除 `/mnt` 下已有的 swap 文件；后者会在打包成功读取各文件后删除整个本地构建树。
 
 ## 运行
 
@@ -40,7 +40,7 @@ README.md
 
 ```text
 prepare
-  ├─ 清理临时 runner、建立 swap、检查空闲空间
+  ├─ 清理 / 上的预装软件、在 / 建立 16 GiB swap（/mnt 整盘留给源码树与检查点）、检查空闲空间
   ├─ ChromiumDash 查询 Android Stable
   ├─ 官方 Git tag 的提交必须与查询返回的 Chromium SHA 相符
   ├─ checkout 固定的 depot_tools；禁用自更新
@@ -101,10 +101,10 @@ Android stable 的版本不是写死的；每次新 workflow run 从官方 API �
 
 | 名称前缀 | 内容 |
 |---|---|
-| `apk-` | `Chromium-Stable-arm64.apk`、`apk-signature.txt`、`SHA256SUMS`、`metadata/`、`BUILD-NOTICE.md` |
+| `apk-` | `Chromium-Stable-arm64.apk`、`apk-signature.txt`、`SHA256SUMS`、`metadata/` |
 | `source-lock-` | 初始版本/源码/工具链锁定记录、DEPS、GN 参数、依赖列表 |
 | `logs-` | 资源信息与编译日志 |
-| `tree-` | 续编译检查点，不是安装包；只保留 3 天 |
+| `tree-` | 续编译检查点，不是安装包；只保留 3 天。每段都会上传完整树，一次跑满 8 段的 run 检查点总量可达 200 GB 以上 |
 
 `metadata/build-lock.json` 包含 Chromium 版本与提交、depot_tools 提交、workflow 源码提交与 run ID。`metadata/runners.jsonl` 记录各编译阶段的 runner 镜像版本和并行度。
 

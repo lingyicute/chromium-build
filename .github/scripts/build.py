@@ -7,7 +7,32 @@ import signal
 import subprocess
 import time
 
+# Exit statuses Ninja returns after handling SIGINT itself (it removes the
+# outputs of interrupted edges first, so the tree is safe to resume):
+#   2   ninja <= 1.12 ("interrupted by user"); Chromium pins 1.12.1.chromium.*
+#   130 ninja >= 1.13 (ExitInterrupted)
+# Status 1 is a genuine build error ("subcommand failed") and must NOT resume.
+NINJA_INTERRUPTED = (2, 130)
+
+
+def kill_session(sid):
+    """SIGKILL every process still in ninja's session. Ninja setpgid()s each
+    child into its own process group, so killpg(ninja) alone cannot reach
+    compiler/linker processes that survived the orderly shutdown."""
+    for entry in os.listdir('/proc'):
+        if not entry.isdigit():
+            continue
+        try:
+            stat = Path('/proc', entry, 'stat').read_text()
+            # Fields after the ")" closing comm: state ppid pgrp session ...
+            if int(stat[stat.rindex(')') + 2:].split()[3]) == sid:
+                os.kill(int(entry), signal.SIGKILL)
+        except (OSError, ValueError, IndexError):
+            pass
+
+
 def supervise(command, seconds, grace=120):
+    # start_new_session: ninja becomes session leader, so session id == p.pid.
     p = subprocess.Popen(command, start_new_session=True)
     try:
         try:
@@ -22,12 +47,12 @@ def supervise(command, seconds, grace=120):
                 rc = p.wait(timeout=grace)
             except subprocess.TimeoutExpired:
                 return 'failed:shutdown-timeout'
-            # Ninja normally returns 1 for an orderly interrupted build.
             if rc == 0:
                 return 'completed'
-            if rc not in (1, -signal.SIGINT, 128 + signal.SIGINT):
-                return f'failed:{rc}'
-            return 'running'
+            # -SIGINT: killed before ninja installed its handler; nothing ran.
+            if rc in NINJA_INTERRUPTED or rc == -signal.SIGINT:
+                return 'running'
+            return f'failed:{rc}'
         return 'completed' if rc == 0 else f'failed:{rc}'
     finally:
         # Also stop descendants before checkpointing (even if ninja exited).
@@ -35,7 +60,9 @@ def supervise(command, seconds, grace=120):
             os.killpg(p.pid, signal.SIGKILL)
         except ProcessLookupError:
             pass
+        kill_session(p.pid)
         p.wait()
+
 
 def main():
     root = Path(os.environ['CR_ROOT'])
@@ -61,6 +88,7 @@ def main():
     with open(os.environ['GITHUB_OUTPUT'], 'a') as f:
         f.write(f'status={status}\n')
     print(f'Stage result: {status}', flush=True)
+
 
 if __name__ == '__main__':
     main()
