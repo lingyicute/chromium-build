@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 source "$(dirname "$0")/common.sh"
-[[ "$CR_ROOT" == /mnt/chromium-relay && "$CR_TRANSFER" == /mnt/chromium-transfer ]] || exit 1
+[[ "$CR_ROOT" == /mnt/chromium-relay && "$CR_TRANSFER" == /mnt/chromium-transfer ]] \
+  || fail 'Refusing destructive export outside the fixed /mnt checkpoint paths'
 mkdir -p "$CR_TRANSFER/checkpoint"
 [[ -z "$(ls -A "$CR_TRANSFER/checkpoint")" ]] || fail 'Checkpoint output must be empty'
 # IMPORTANT: destructive export on a disposable VM. No commands may use the
