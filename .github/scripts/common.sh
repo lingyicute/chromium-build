@@ -43,10 +43,11 @@ retry() {
     rc=0
     "$@" && return 0 || rc=$?
     if (( rc == 130 || rc == 143 )); then
-      fail "Interrupted (exit $rc), aborting without retry: $*"
+      echo "::error::Interrupted (exit $rc), aborting without retry: $*" >&2
+      exit "$rc"
     fi
     (( attempt < 3 )) || fail "Failed after 3 attempts: $* (exit $rc)"
     echo "::warning::Attempt $attempt failed (exit $rc), retrying: $*" >&2
-    sleep $(( attempt * delay ))
+    sleep $(( attempt * 10#$delay ))
   done
 }
