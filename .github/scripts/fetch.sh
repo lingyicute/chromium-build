@@ -62,6 +62,8 @@ PY
 # Do NOT run install-build-deps.sh: that would add an Ubuntu APT trust path.
 # Missing system libraries/tools fail visibly instead of fetching alternatives.
 retry gclient runhooks
+[[ "$(git -C src rev-parse HEAD)" == "$revision" ]] || fail 'gclient runhooks changed source revision'
+[[ "$(git -C depot_tools rev-parse HEAD)" == "$depot_revision" ]] || fail 'depot_tools revision changed after sync/hooks'
 gclient revinfo > "$CR_ROOT/metadata/dependencies.txt"
 cp "$CR_ROOT/src/DEPS" "$CR_ROOT/metadata/DEPS"
 mkdir -p "$CR_ROOT/src/out/Release"
