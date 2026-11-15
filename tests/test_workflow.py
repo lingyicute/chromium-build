@@ -114,24 +114,33 @@ class Resolution(unittest.TestCase):
 
 
 class Checkpoint(unittest.TestCase):
+    PARTS = [b'firsts', b'econd']
+
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.root = Path(self.temp.name)
-        (self.root / 'tree.part-00000').write_bytes(b'first')
-        (self.root / 'tree.part-00001').write_bytes(b'second')
-        self.expected = hashlib.sha256(b'firstsecond').hexdigest()
+        self.expected, _, _ = checkpoint.pack_stream(self.root, io.BytesIO(b''.join(self.PARTS)), chunk_size=6)
 
     def tearDown(self):
         self.temp.cleanup()
 
+    def names(self, directory=None):
+        return sorted(p.name for p in (directory or self.root).iterdir())
+
     def test_hash(self):
-        self.assertEqual(checkpoint.digest(checkpoint.parts(self.root)), self.expected)
-        checkpoint.verify(checkpoint.parts(self.root), self.expected)
+        manifest = ''.join(f'{hashlib.sha256(data).hexdigest()} {len(data)} tree.part-{n:05d}\n'
+                           for n, data in enumerate(self.PARTS)).encode()
+        self.assertEqual((self.root / 'tree.manifest').read_bytes(), manifest)
+        self.assertEqual(self.expected, hashlib.sha256(manifest).hexdigest())
+        self.assertEqual(checkpoint.digest(self.root), self.expected)
+        self.assertEqual([p.read_bytes() for p in checkpoint.parts(self.root)], self.PARTS)
 
     def test_tampering(self):
         (self.root / 'tree.part-00001').write_bytes(b'bad')
         with self.assertRaises(ValueError):
-            checkpoint.verify(checkpoint.parts(self.root), self.expected)
+            checkpoint.digest(self.root)
+        with self.assertRaises(ValueError):
+            checkpoint.restore_stream(self.root, self.expected, io.BytesIO())
 
     def test_missing_part(self):
         (self.root / 'tree.part-00000').unlink()
@@ -160,14 +169,14 @@ class Checkpoint(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             dest = Path(tmp)
             sha, count, total = checkpoint.pack_stream(dest, io.BytesIO(payload), chunk_size=4)
-            self.assertEqual(sha, hashlib.sha256(payload).hexdigest())
             self.assertEqual(count, 3)
             self.assertEqual(total, len(payload))
-            self.assertEqual([p.name for p in checkpoint.parts(dest)],
-                             ['tree.part-00000', 'tree.part-00001', 'tree.part-00002'])
-            self.assertEqual(checkpoint.digest(checkpoint.parts(dest)), sha)
+            self.assertEqual(self.names(dest),
+                             ['tree.manifest', 'tree.part-00000', 'tree.part-00001', 'tree.part-00002'])
+            self.assertEqual([p.read_bytes() for p in checkpoint.parts(dest)], [b'abcd', b'efgh', b'ijk'])
+            self.assertEqual(checkpoint.digest(dest), sha)
             out = io.BytesIO()
-            checkpoint.restore_stream(dest, sha, out)
+            self.assertEqual(checkpoint.restore_stream(dest, sha, out), (3, len(payload)))
             self.assertEqual(out.getvalue(), payload)
             self.assertEqual(list(dest.iterdir()), [])
 
@@ -176,12 +185,14 @@ class Checkpoint(unittest.TestCase):
             dest = Path(tmp)
             sha, count, total = checkpoint.pack_stream(dest, io.BytesIO(b'12345678'), chunk_size=4)
             self.assertEqual((count, total), (2, 8))
-            self.assertEqual(sha, hashlib.sha256(b'12345678').hexdigest())
+            self.assertEqual([p.read_bytes() for p in checkpoint.parts(dest)], [b'1234', b'5678'])
+            self.assertEqual(checkpoint.digest(dest), sha)
             with self.assertRaises(ValueError):
                 checkpoint.pack_stream(dest, io.BytesIO(b'more'), chunk_size=4)
         with tempfile.TemporaryDirectory() as tmp:
             with self.assertRaises(ValueError):
                 checkpoint.pack_stream(Path(tmp), io.BytesIO(b''), chunk_size=4)
+            self.assertEqual(list(Path(tmp).iterdir()), [])
 
     def consume(self, expected):
         return subprocess.run(
@@ -199,7 +210,7 @@ class Checkpoint(unittest.TestCase):
         p = self.consume('0' * 64)
         self.assertNotEqual(p.returncode, 0)
         self.assertEqual(p.stdout, b'')
-        self.assertEqual(len(list(self.root.iterdir())), 2)
+        self.assertEqual(len(self.names()), 3)
 
     def test_tar_metadata_round_trip(self):
         # Tests real GNU tar without compression, including nested read-only dirs.

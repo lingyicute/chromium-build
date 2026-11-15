@@ -13,7 +13,7 @@ on:
         type: string
         default: ''
       sha256:
-        description: Producer SHA-256 of the checkpoint; must be empty for stage 00.
+        description: Producer SHA-256 of the checkpoint manifest; must be empty for stage 00.
         required: false
         type: string
         default: ''
@@ -132,7 +132,9 @@ jobs:
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: tree-${{ github.run_id }}-${{ github.run_attempt }}-${{ inputs.stage }}
-          path: /mnt/chromium-transfer/checkpoint/tree.part-*
+          path: |
+            /mnt/chromium-transfer/checkpoint/tree.manifest
+            /mnt/chromium-transfer/checkpoint/tree.part-*
           compression-level: 0
           if-no-files-found: error
           retention-days: 3

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Stream-split and hash a multipart checkpoint; verify BEFORE consuming into tar."""
+"""Stream-split a checkpoint into hashed parts; verify each part BEFORE tar consumes it."""
 import hashlib
 import os
 from pathlib import Path
@@ -11,44 +11,93 @@ import time
 CHUNK_SIZE = 1024 * 1024 * 1024  # 1 GiB
 IO_BUFFER = 8 * 1024 * 1024      # 8 MiB
 MAX_PARTS = 100000
+# The checkpoint digest handed to the next job is the SHA-256 of this manifest,
+# which pins the SHA-256 and size of every part. Restore can then verify a part
+# and stream it while it is still in the page cache, instead of reading the
+# whole checkpoint from disk once to hash it and a second time to extract it.
+MANIFEST = 'tree.manifest'
+MANIFEST_LINE = re.compile(r'([0-9a-f]{64}) ([1-9][0-9]{0,18}) (tree\.part-[0-9]{5})\n')
+MAX_MANIFEST_BYTES = MAX_PARTS * 128
+BAD_LAYOUT = 'Checkpoint parts missing, unexpected, or non-contiguous'
+MISMATCH = 'Checkpoint SHA-256 mismatch; refusing to extract'
+
+
+def part_name(n):
+    return f'tree.part-{n:05d}'
 
 
 def parts(directory):
+    """Part paths of a directory holding exactly the manifest and contiguous parts."""
+    root = Path(directory)
     try:
-        files = sorted(Path(directory).iterdir())
+        names = sorted(p.name for p in root.iterdir())
     except OSError as exc:
         raise ValueError('Checkpoint directory unreadable') from exc
-    if not files:
-        raise ValueError('Checkpoint parts missing, unexpected, or non-contiguous')
-    for n, p in enumerate(files):
+    count = len(names) - 1
+    if not 1 <= count <= MAX_PARTS or names != sorted([MANIFEST] + [part_name(n) for n in range(count)]):
+        raise ValueError(BAD_LAYOUT)
+    for name in names:
         try:
-            st = p.lstat()
+            st = (root / name).lstat()
         except OSError as exc:
             raise ValueError('Checkpoint part unreadable') from exc
-        if (p.name != f'tree.part-{n:05d}'
-                or not stat.S_ISREG(st.st_mode)
-                or st.st_size <= 0):
-            raise ValueError('Checkpoint parts missing, unexpected, or non-contiguous')
-    return files
+        if not stat.S_ISREG(st.st_mode) or st.st_size <= 0:
+            raise ValueError(BAD_LAYOUT)
+    return [root / part_name(n) for n in range(count)]
 
 
-def digest(files):
+def sha256_file(path):
     h = hashlib.sha256()
     buf = bytearray(IO_BUFFER)
     view = memoryview(buf)
-    for p in files:
-        with p.open('rb') as f:
-            while True:
-                n = f.readinto(buf)
-                if not n:
-                    break
-                h.update(view[:n])
-    return h.hexdigest()
+    size = 0
+    with path.open('rb') as f:
+        while True:
+            n = f.readinto(buf)
+            if not n:
+                break
+            h.update(view[:n])
+            size += n
+    return h.hexdigest(), size
 
 
-def verify(files, expected):
-    if not isinstance(expected, str) or not re.fullmatch(r'[0-9a-f]{64}', expected) or digest(files) != expected:
-        raise ValueError('Checkpoint SHA-256 mismatch; refusing to extract')
+def _manifest_bytes(directory):
+    with (Path(directory) / MANIFEST).open('rb') as f:
+        return f.read(MAX_MANIFEST_BYTES + 1)
+
+
+def manifest(directory, expected):
+    """Authenticate the manifest with the producer digest; return [(part, (sha256, size))]."""
+    files = parts(directory)
+    raw = _manifest_bytes(directory)
+    if (not isinstance(expected, str) or not re.fullmatch(r'[0-9a-f]{64}', expected)
+            or hashlib.sha256(raw).hexdigest() != expected):
+        raise ValueError(MISMATCH)
+    lines = raw.decode('ascii', 'replace').splitlines(keepends=True)
+    if len(lines) != len(files):
+        raise ValueError(BAD_LAYOUT)
+    entries = []
+    for path, line in zip(files, lines):
+        m = MANIFEST_LINE.fullmatch(line)
+        # A wrong size (e.g. a truncated download) is caught before any byte is streamed.
+        if not m or m[3] != path.name or int(m[2]) != path.lstat().st_size:
+            raise ValueError(BAD_LAYOUT)
+        entries.append((path, (m[1], int(m[2]))))
+    return entries
+
+
+def verify_part(path, entry):
+    if sha256_file(path) != entry:
+        raise ValueError(MISMATCH)
+
+
+def digest(directory):
+    """SHA-256 of the manifest, after checking that every part matches it."""
+    parts(directory)
+    expected = hashlib.sha256(_manifest_bytes(directory)).hexdigest()
+    for path, entry in manifest(directory, expected):
+        verify_part(path, entry)
+    return expected
 
 
 def pack_stream(directory, in_stream, chunk_size=CHUNK_SIZE):
@@ -60,54 +109,62 @@ def pack_stream(directory, in_stream, chunk_size=CHUNK_SIZE):
     if any(dest.iterdir()):
         raise ValueError('Checkpoint output must be empty')
 
-    h = hashlib.sha256()
     buf = bytearray(min(IO_BUFFER, chunk_size))
     view = memoryview(buf)
-    part_index = 0
-    written_in_part = 0
+    lines = []
     total_bytes = 0
-    out = None
+    out = h = name = None
+    written = 0
     try:
         while True:
-            remaining = chunk_size - written_in_part if out is not None else min(len(buf), chunk_size)
-            read_slice = view[:min(len(buf), remaining)]
+            room = chunk_size - written if out is not None else chunk_size
+            read_slice = view[:min(len(buf), room)]
             n = in_stream.readinto(read_slice)
             if not n:
                 break
             if out is None:
-                if part_index >= MAX_PARTS:
+                if len(lines) >= MAX_PARTS:
                     raise ValueError('Checkpoint exceeded maximum part count')
-                out = (dest / f'tree.part-{part_index:05d}').open('wb')
-                written_in_part = 0
+                name = part_name(len(lines))
+                out = (dest / name).open('wb')
+                h = hashlib.sha256()
+                written = 0
             chunk = read_slice[:n]
             out.write(chunk)
             h.update(chunk)
-            written_in_part += n
+            written += n
             total_bytes += n
-            if written_in_part == chunk_size:
+            if written == chunk_size:
                 out.close()
                 out = None
-                part_index += 1
+                lines.append(f'{h.hexdigest()} {written} {name}\n')
+        if out is not None:
+            out.close()
+            out = None
+            lines.append(f'{h.hexdigest()} {written} {name}\n')
     finally:
         if out is not None:
             out.close()
 
     if total_bytes == 0:
         raise ValueError('Empty checkpoint stream')
-    part_count = part_index + (1 if written_in_part > 0 and written_in_part < chunk_size else 0)
-    return h.hexdigest(), part_count, total_bytes
+    data = ''.join(lines).encode('ascii')
+    (dest / MANIFEST).write_bytes(data)
+    return hashlib.sha256(data).hexdigest(), len(lines), total_bytes
 
 
 def restore_stream(directory, expected, out_stream):
-    files = parts(directory)
-    verify(files, expected)
+    entries = manifest(directory, expected)
     buf = bytearray(IO_BUFFER)
     view = memoryview(buf)
     total_bytes = 0
     # Unlink each compressed chunk after it is consumed to reduce peak disk.
     # Downstream failure loses this disposable local copy, NOT the artifact.
-    for p in files:
-        with p.open('rb') as f:
+    for path, entry in entries:
+        # zstd/tar never see an unverified byte. The part just hashed is still
+        # in the page cache, so streaming it costs no second disk read.
+        verify_part(path, entry)
+        with path.open('rb') as f:
             while True:
                 n = f.readinto(buf)
                 if not n:
@@ -115,8 +172,9 @@ def restore_stream(directory, expected, out_stream):
                 out_stream.write(view[:n])
                 total_bytes += n
         out_stream.flush()
-        p.unlink()
-    return len(files), total_bytes
+        path.unlink()
+    (Path(directory) / MANIFEST).unlink()
+    return len(entries), total_bytes
 
 
 def main():
@@ -125,7 +183,7 @@ def main():
         raise ValueError('Usage: checkpoint.py <hash|pack-stream|restore-stream> <directory> [--chunk-size N]')
     operation, directory = args[0], args[1]
     if operation == 'hash' and len(args) == 2:
-        print(digest(parts(directory)))
+        print(digest(directory))
     elif operation == 'pack-stream' and len(args) in (2, 4):
         chunk_size = CHUNK_SIZE
         if len(args) == 4:
