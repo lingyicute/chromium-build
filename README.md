@@ -57,7 +57,8 @@ part-01 → part-02 → … → part-08
   ├─ 本地 Ninja 编译至本 job 开始后第 265 分钟（最终段 part-08 为第 330 分钟）
   ├─ 正常到点未完成：常规段正常中断并导出新检查点；最终段跳过无用检查点直接结束
   ├─ 真正编译失败/OOM/停机失败：直接失败
-  └─ 完成：验证 APK 签名并上传产物，跳过后续分段
+  ├─ 完成：验证 APK 签名并上传产物，跳过后续分段
+  └─ 检查点下载/上传与 APK 上传失败时各自动重试一次
        ↓
 result：只有确实完成且必要 job 未失败才算成功
 ```
@@ -103,6 +104,7 @@ Android stable 的版本不是写死的；每次新 workflow run 从官方 API �
 | 名称前缀 | 内容 |
 |---|---|
 | `apk-` | `Chromium-Stable-arm64.apk`、`apk-signature.txt`、`SHA256SUMS`、`metadata/` |
+| `unverified-apk-` | 仅在编译完成但验签/结构检查或 APK 上传失败时出现：未经验证的原始 APK，仅供排查，不要安装或分发；只保留 3 天 |
 | `source-lock-` | 初始版本/源码/工具链锁定记录、DEPS、GN 参数、依赖列表 |
 | `logs-` | 资源信息与编译日志 |
 | `tree-` | 续编译检查点，不是安装包；只保留 3 天。每段都会上传完整树，一次跑满 8 段的 run 检查点总量可达 200 GB 以上 |
@@ -119,6 +121,8 @@ Android stable 的版本不是写死的；每次新 workflow run 从官方 API �
 - `gclient` / hooks 失败：源码 fetch、`gclient sync` 与 hooks 会针对同一官方来源和版本各自最多尝试 3 次（不切换镜像或版本）；仍失败时查看 prepare 日志，网络问题可以重跑。
 - `GN --fail-on-unused-args` 失败：新版上游可能调整参数，需要人工审查 `config/args.gn`。不静默忽略未知参数。
 - artifact 摘要不符：停止；不要关闭验证。重新获取或重新构建，并核查生产者。
+- artifact 传输失败：检查点下载、检查点上传与 APK 上传各自动重试一次；重新上传使用带 `-retry` 后缀的新 artifact 名（后续段按 artifact ID 取用，不受影响）。检查点上传的重试受 350 分钟 job 上限约束，属尽力而为。
+- 编译完成但 `release.sh` 检查失败：job 仍判失败，同时把原始 APK 另存为 `unverified-apk-` artifact，避免整次构建的结果只因一项检查而丢失。
 - 编译 job 失败：在检查点仍存在的前提下，可尝试 GitHub 的 **Re-run failed jobs**。它仍属于原 run，artifact ID/输出必须可用；新 attempt 使用独立命名。若 GitHub 未保留所需 job 输出或 artifact 已过期，启动新 run。`prepare` 没有前序检查点，它在编译中失败时重跑会从源码同步重新开始。
 
 ## 参考
