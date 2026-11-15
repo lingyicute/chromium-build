@@ -13,9 +13,10 @@ import time
 #   130 ninja >= 1.13 (ExitInterrupted)
 # Status 1 is a genuine build error ("subcommand failed") and must NOT resume.
 NINJA_INTERRUPTED = (2, 130)
-NORMAL_SLICE_SECONDS = 210 * 60
+# Compile until a fixed offset from the job start recorded by host.sh. The rest
+# of the 350-minute job is reserved for checkpoint pack/upload (normal stages)
+# or APK verification/upload (final stage); a faster setup means more compiling.
 NORMAL_JOB_DEADLINE_SECONDS = 265 * 60
-FINAL_SLICE_SECONDS = 270 * 60
 FINAL_JOB_DEADLINE_SECONDS = 330 * 60
 MIN_BUDGET_SECONDS = 300
 
@@ -37,13 +38,8 @@ def compute_jobs(cpu_count=None, mem_kib=None):
 
 
 def compute_budget(started, now, final_stage=False):
-    if final_stage:
-        slice_limit = FINAL_SLICE_SECONDS
-        job_deadline = started + FINAL_JOB_DEADLINE_SECONDS
-    else:
-        slice_limit = NORMAL_SLICE_SECONDS
-        job_deadline = started + NORMAL_JOB_DEADLINE_SECONDS
-    return min(slice_limit, job_deadline - now)
+    deadline = FINAL_JOB_DEADLINE_SECONDS if final_stage else NORMAL_JOB_DEADLINE_SECONDS
+    return started + deadline - now
 
 
 def _live_session_pids(sid):

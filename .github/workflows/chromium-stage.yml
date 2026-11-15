@@ -102,7 +102,8 @@ jobs:
         run: bash .github/scripts/restore.sh
       - name: Compile until completion or our orderly checkpoint deadline
         id: build
-        timeout-minutes: 280
+        # Backstop only: build.py stops Ninja at the job deadline (<= 330 min).
+        timeout-minutes: 335
         env:
           STAGE: ${{ inputs.stage }}
           FINAL_STAGE: ${{ inputs.final }}

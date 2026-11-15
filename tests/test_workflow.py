@@ -292,10 +292,11 @@ class Deadline(unittest.TestCase):
         self.assertEqual(build.compute_jobs(cpu_count=4, mem_kib=2 * 1024 * 1024), 1)
 
     def test_compute_budget(self):
-        self.assertEqual(build.compute_budget(1000, 1000 + 30 * 60, final_stage=False), 210 * 60)
+        self.assertEqual(build.compute_budget(1000, 1000 + 20 * 60, final_stage=False), 245 * 60)
         self.assertEqual(build.compute_budget(1000, 1000 + 80 * 60, final_stage=False), 185 * 60)
-        self.assertEqual(build.compute_budget(1000, 1000 + 30 * 60, final_stage=True), 270 * 60)
+        self.assertEqual(build.compute_budget(1000, 1000 + 20 * 60, final_stage=True), 310 * 60)
         self.assertEqual(build.compute_budget(1000, 1000 + 80 * 60, final_stage=True), 250 * 60)
+        self.assertLess(build.compute_budget(1000, 1000 + 262 * 60, final_stage=False), build.MIN_BUDGET_SECONDS)
 
 
 class Retry(unittest.TestCase):
@@ -364,6 +365,10 @@ class StaticPolicy(unittest.TestCase):
         self.assertLessEqual(build.NORMAL_JOB_DEADLINE_SECONDS // 60 + 3 + 45 + 35, 350)
         # Final stage worst-case: 330m budget + 3m grace + 10m release/upload < 350m.
         self.assertLessEqual(build.FINAL_JOB_DEADLINE_SECONDS // 60 + 3 + 10, 350)
+        # The compile step backstop must never cut off an orderly final-stage stop.
+        step_timeout = int(re.search(r'id: build\n(?:\s+#.*\n)*\s+timeout-minutes: (\d+)', stage)[1])
+        self.assertGreaterEqual(step_timeout, build.FINAL_JOB_DEADLINE_SECONDS // 60 + 3)
+        self.assertLessEqual(step_timeout, 350)
 
     def test_prepare_compiles_as_stage_00(self):
         stable = (ROOT / '.github/workflows/chromium-stable.yml').read_text()
