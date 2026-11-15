@@ -9,6 +9,7 @@
   workflows/
     chromium-stable.yml       # 手动触发、准备段（stage 00）、最多 8 个续编段、最终检查
     chromium-stage.yml        # 准备段与续编段共用的单段 job，不是 composite Action
+    tests.yml                 # 每次 push 运行 tests/ 下的离线测试，不编译 Chromium
   scripts/
     common.sh                # 固定绝对路径、工具缓存位置与网络重试
     host.sh                  # 临时 VM 清理、/ 上建 swap、资源检查，不安装系统包
