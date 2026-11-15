@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Resolve Android Stable ONCE. No executable code is read from release JSON."""
 import datetime
+import http.client
 import json
 import os
 from pathlib import Path
@@ -13,6 +14,8 @@ URL = 'https://chromiumdash.appspot.com/fetch_releases?channel=Stable&platform=A
 MAX_BYTES = 1024 * 1024
 FETCH_ATTEMPTS = 3
 RETRY_BASE_SECONDS = 2.0
+RETRYABLE_HTTP_CODES = frozenset({408, 429})
+MAX_RETRY_AFTER_SECONDS = 60.0
 
 
 class _NoRedirectHandler(urllib.request.HTTPRedirectHandler):
@@ -40,8 +43,20 @@ def validate(releases):
     return version, revision
 
 
+def _retry_delay(attempt, retry_delay, headers=None):
+    if retry_delay <= 0:
+        return 0.0
+    if headers is not None:
+        raw_after = headers.get('Retry-After') if hasattr(headers, 'get') else None
+        if isinstance(raw_after, str) and re.fullmatch(r'[0-9]+', raw_after.strip()):
+            return min(float(raw_after.strip()), MAX_RETRY_AFTER_SECONDS)
+    return retry_delay * (2 ** (attempt - 1))
+
+
 def fetch_release_json(url=URL, timeout=90, attempts=FETCH_ATTEMPTS,
                        retry_delay=RETRY_BASE_SECONDS, opener=None):
+    if attempts < 1:
+        raise ValueError('attempts must be positive')
     if opener is None:
         opener = urllib.request.build_opener(_NoRedirectHandler())
     req = urllib.request.Request(
@@ -59,14 +74,22 @@ def fetch_release_json(url=URL, timeout=90, attempts=FETCH_ATTEMPTS,
                 raise ValueError('Oversized response')
             return raw
         except urllib.error.HTTPError as exc:
-            if exc.code < 500 or attempt == attempts:
+            retryable = exc.code in RETRYABLE_HTTP_CODES or exc.code >= 500
+            if not retryable or attempt == attempts:
                 raise
+            delay = _retry_delay(attempt, retry_delay, getattr(exc, 'headers', None))
+            try:
+                exc.close()
+            except Exception:
+                pass
             last_error = exc
-        except (urllib.error.URLError, TimeoutError, OSError) as exc:
+        except (urllib.error.URLError, http.client.HTTPException, TimeoutError, OSError) as exc:
             if attempt == attempts:
                 raise
+            delay = _retry_delay(attempt, retry_delay)
             last_error = exc
-        time.sleep(retry_delay * (2 ** (attempt - 1)))
+        if delay > 0:
+            time.sleep(delay)
     raise last_error
 
 
