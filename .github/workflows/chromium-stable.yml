@@ -112,7 +112,7 @@ jobs:
           errors = [name for name in order if needs.get(name, {}).get('result') in ('failure', 'cancelled')]
           completed = [name for name in order if needs.get(name, {}).get('outputs', {}).get('status') == 'completed']
           exhausted = any(needs.get(name, {}).get('outputs', {}).get('status') == 'exhausted' for name in order)
-          ok = bool(completed) and not errors
+          ok = bool(completed) and not errors and all(needs.get(name, {}).get('result') == 'success' for name in completed)
 
           if ok:
               reason = f'APK completed in `{completed[-1]}`; see the `apk-*` artifact.'
