@@ -27,5 +27,6 @@ hash=$(
     | "$CR_PYTHON" "$GITHUB_WORKSPACE/.github/scripts/checkpoint.py" pack-stream "$CR_TRANSFER/checkpoint"
 )
 [[ "$hash" =~ ^[0-9a-f]{64}$ ]] || fail 'Invalid checkpoint SHA-256 output'
+[[ -z "$(ls -A "$CR_ROOT")" ]] || fail 'Destructive export left files behind in build root'
 echo "sha256=$hash" >> "$GITHUB_OUTPUT"
 du -sh "$CR_TRANSFER/checkpoint"
