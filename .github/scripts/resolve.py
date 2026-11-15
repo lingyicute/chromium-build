@@ -5,34 +5,76 @@ import json
 import os
 from pathlib import Path
 import re
+import time
+import urllib.error
 import urllib.request
 
 URL = 'https://chromiumdash.appspot.com/fetch_releases?channel=Stable&platform=Android&num=1'
+MAX_BYTES = 1024 * 1024
+FETCH_ATTEMPTS = 3
+RETRY_BASE_SECONDS = 2.0
+
+
+class _NoRedirectHandler(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        raise ValueError(f'Unexpected ChromiumDash redirect ({code}): {newurl}')
+
 
 def validate(releases):
     if not isinstance(releases, list) or not releases:
         raise ValueError('Empty/invalid ChromiumDash response')
     release = releases[0]
+    if not isinstance(release, dict):
+        raise ValueError('Invalid ChromiumDash release entry')
     if release.get('channel') != 'Stable' or release.get('platform') != 'Android':
         raise ValueError('Not Android Stable')
-    version = release.get('version', '')
-    revision = release.get('hashes', {}).get('chromium', '')
-    if not re.fullmatch(r'[0-9]{1,4}(?:\.[0-9]{1,6}){3}', version):
+    hashes = release.get('hashes')
+    if not isinstance(hashes, dict):
+        raise ValueError('Missing Chromium hashes')
+    version = release.get('version')
+    revision = hashes.get('chromium')
+    if not isinstance(version, str) or not re.fullmatch(r'[0-9]{1,4}(?:\.[0-9]{1,6}){3}', version):
         raise ValueError('Invalid version')
-    if not re.fullmatch(r'[0-9a-f]{40}', revision):
+    if not isinstance(revision, str) or not re.fullmatch(r'[0-9a-f]{40}', revision):
         raise ValueError('Invalid Chromium commit')
     return version, revision
+
+
+def fetch_release_json(url=URL, timeout=90, attempts=FETCH_ATTEMPTS,
+                       retry_delay=RETRY_BASE_SECONDS, opener=None):
+    if opener is None:
+        opener = urllib.request.build_opener(_NoRedirectHandler())
+    req = urllib.request.Request(
+        url,
+        headers={'Accept': 'application/json', 'User-Agent': 'chromium-build-resolver'},
+    )
+    last_error = None
+    for attempt in range(1, attempts + 1):
+        try:
+            with opener.open(req, timeout=timeout) as response:
+                if response.url != url:
+                    raise ValueError('Unexpected ChromiumDash redirect')
+                raw = response.read(MAX_BYTES + 1)
+            if len(raw) > MAX_BYTES:
+                raise ValueError('Oversized response')
+            return raw
+        except urllib.error.HTTPError as exc:
+            if exc.code < 500 or attempt == attempts:
+                raise
+            last_error = exc
+        except (urllib.error.URLError, TimeoutError, OSError) as exc:
+            if attempt == attempts:
+                raise
+            last_error = exc
+        time.sleep(retry_delay * (2 ** (attempt - 1)))
+    raise last_error
+
 
 def main():
     root = Path(os.environ['CR_ROOT'])
     meta = root / 'metadata'
     meta.mkdir(parents=True, exist_ok=True)
-    with urllib.request.urlopen(URL, timeout=90) as response:
-        if response.url != URL:
-            raise ValueError('Unexpected ChromiumDash redirect')
-        raw = response.read(1024 * 1024 + 1)
-    if len(raw) > 1024 * 1024:
-        raise ValueError('Oversized response')
+    raw = fetch_release_json()
     version, revision = validate(json.loads(raw))
     depot = (Path(os.environ['GITHUB_WORKSPACE']) / 'config/depot_tools_revision.txt').read_text().strip()
     if not re.fullmatch(r'[0-9a-f]{40}', depot):
@@ -46,6 +88,7 @@ def main():
     (meta / 'chromiumdash.json').write_bytes(raw)
     (meta / 'build-lock.json').write_text(json.dumps(lock, indent=2) + '\n')
     print(json.dumps(lock, indent=2))
+
 
 if __name__ == '__main__':
     main()
