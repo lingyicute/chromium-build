@@ -243,6 +243,17 @@ class Checkpoint(unittest.TestCase):
                 checkpoint.restore_stream(dest, sha, out)
             self.assertEqual(out.getvalue(), b'')
 
+    def test_part_hashed_ahead_is_checked_before_streaming(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            dest = Path(tmp)
+            sha, _, _ = checkpoint.pack_stream(dest, io.BytesIO(b'aaaabbbbcccc'), chunk_size=4)
+            (dest / 'tree.part-00002').write_bytes(b'CCCC')
+            out = io.BytesIO()
+            with self.assertRaises(ValueError):
+                checkpoint.restore_stream(dest, sha, out)
+            self.assertEqual(out.getvalue(), b'aaaabbbb')
+            self.assertEqual(self.names(dest), ['tree.manifest', 'tree.part-00002'])
+
     def test_forged_manifest_rejected(self):
         # Re-describing a tampered part changes the manifest digest the next job expects.
         forged = [self.PARTS[0], b'ECOND']

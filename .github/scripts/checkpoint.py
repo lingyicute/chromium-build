@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Stream-split a checkpoint into hashed parts; verify each part BEFORE tar consumes it."""
+from concurrent.futures import ThreadPoolExecutor
 import hashlib
 import os
 from pathlib import Path
@@ -160,19 +161,24 @@ def restore_stream(directory, expected, out_stream):
     total_bytes = 0
     # Unlink each compressed chunk after it is consumed to reduce peak disk.
     # Downstream failure loses this disposable local copy, NOT the artifact.
-    for path, entry in entries:
-        # zstd/tar never see an unverified byte. The part just hashed is still
-        # in the page cache, so streaming it costs no second disk read.
-        verify_part(path, entry)
-        with path.open('rb') as f:
-            while True:
-                n = f.readinto(buf)
-                if not n:
-                    break
-                out_stream.write(view[:n])
-                total_bytes += n
-        out_stream.flush()
-        path.unlink()
+    # zstd/tar never see an unverified byte: a part is streamed only after its
+    # own check. The next part is hashed meanwhile on a helper thread, so that
+    # disk read overlaps extraction and the part is streamed from the page cache.
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        check = pool.submit(verify_part, *entries[0])
+        for n, (path, _) in enumerate(entries):
+            check.result()
+            if n + 1 < len(entries):
+                check = pool.submit(verify_part, *entries[n + 1])
+            with path.open('rb') as f:
+                while True:
+                    size = f.readinto(buf)
+                    if not size:
+                        break
+                    out_stream.write(view[:size])
+                    total_bytes += size
+            out_stream.flush()
+            path.unlink()
     (Path(directory) / MANIFEST).unlink()
     return len(entries), total_bytes
 
