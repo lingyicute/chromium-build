@@ -5,11 +5,12 @@ set -Eeuo pipefail
 [[ "$(uname -m)" == x86_64 ]] || { echo "Unsupported architecture: $(uname -m) (need x86_64)"; exit 1; }
 . /etc/os-release
 [[ "$ID" == ubuntu && "$VERSION_ID" == 24.04 ]] || { echo "Unsupported image: $ID $VERSION_ID (need ubuntu 24.04)"; exit 1; }
-mkdir -p "$RUNNER_TEMP/chromium-logs"
-date +%s > "$RUNNER_TEMP/chromium-job-start"
-for cmd in git python3 tar zstd split sha256sum timeout fallocate mkswap swapon swapoff free df; do
+mkdir -p "${RUNNER_TEMP:?}/chromium-logs"
+for cmd in git python3 tar zstd sha256sum timeout fallocate mkswap swapon swapoff free df find sort xargs tee; do
   command -v "$cmd" >/dev/null || { echo "Missing runner tool: $cmd; refusing apt/pip fallback"; exit 1; }
 done
+# Record monotonic boot time so NTP wall-clock adjustments cannot skew stage budgets.
+python3 -c 'import time; print(int(time.clock_gettime(time.CLOCK_BOOTTIME)))' > "$RUNNER_TEMP/chromium-job-start"
 # Disk layout: / (OS disk) receives the swap file; /mnt (the larger ephemeral
 # disk) is kept entirely for the Chromium tree and checkpoints. Freeing / is
 # what makes room for the swap below.
@@ -21,7 +22,7 @@ sudo rm -rf -- /usr/local/lib/android /usr/local/.ghcup /usr/share/dotnet \
 sudo mkdir -p /mnt/chromium-relay /mnt/chromium-transfer
 sudo chown "$(id -u):$(id -g)" /mnt/chromium-relay /mnt/chromium-transfer
 # The image ships its own swap file on /mnt; reclaim that space for the tree.
-while read -r dev; do
+while IFS= read -r dev; do
   [[ "$dev" == /mnt/* ]] || continue
   sudo swapoff "$dev" && sudo rm -f "$dev"
 done < <(swapon --show=NAME --noheadings)
