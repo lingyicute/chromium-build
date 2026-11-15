@@ -365,6 +365,46 @@ class Deadline(unittest.TestCase):
         self.assertLess(build.compute_budget(1000, 1000 + 262 * 60, final_stage=False), build.MIN_BUDGET_SECONDS)
 
 
+class Supervisor(unittest.TestCase):
+    def run_main(self, ninja, started_minutes_ago=0):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            fake = tmp / 'root/src/third_party/ninja/ninja'
+            fake.parent.mkdir(parents=True)
+            (tmp / 'root/metadata').mkdir()
+            fake.write_text('#!/bin/sh\n' + ninja + '\n')
+            fake.chmod(0o755)
+            (tmp / 'chromium-job-start').write_text(str(int(build.monotonic_now()) - started_minutes_ago * 60))
+            env = dict(os.environ, CR_ROOT=str(tmp / 'root'), RUNNER_TEMP=str(tmp), STAGE='03',
+                       GITHUB_RUN_ATTEMPT='1', GITHUB_OUTPUT=str(tmp / 'output'),
+                       GITHUB_STEP_SUMMARY=str(tmp / 'summary'))
+            p = subprocess.run([sys.executable, str(ROOT / '.github/scripts/build.py')],
+                               env=env, capture_output=True, text=True)
+            files = {name: (tmp / name).read_text() if (tmp / name).exists() else ''
+                     for name in ('output', 'summary', 'root/metadata/runners.jsonl')}
+            return p, files
+
+    def test_completed_build_reports_status_and_record(self):
+        p, files = self.run_main('echo "$@" > args.txt')
+        self.assertEqual(p.returncode, 0, p.stderr)
+        self.assertEqual(files['output'], 'status=completed\n')
+        record = json.loads(files['root/metadata/runners.jsonl'])
+        self.assertEqual((record['stage'], record['status'], record['final_stage']), ('03', 'completed', False))
+        self.assertEqual(record['jobs'], build.compute_jobs())
+
+    def test_failed_build_reports_no_status(self):
+        p, files = self.run_main('exit 1')
+        self.assertNotEqual(p.returncode, 0)
+        self.assertIn('NOT checkpointing: failed:1', p.stderr)
+        self.assertEqual((files['output'], files['root/metadata/runners.jsonl']), ('', ''))
+
+    def test_spent_budget_refuses_to_start(self):
+        p, files = self.run_main('exit 0', started_minutes_ago=build.NORMAL_JOB_DEADLINE_SECONDS // 60)
+        self.assertNotEqual(p.returncode, 0)
+        self.assertIn('exhausted the time budget', p.stderr)
+        self.assertEqual(files['output'], '')
+
+
 class Retry(unittest.TestCase):
     def run_retry(self, body):
         with tempfile.TemporaryDirectory() as tmp:
