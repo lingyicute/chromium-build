@@ -439,7 +439,8 @@ class StaticPolicy(unittest.TestCase):
         # Uploads that nothing consumes may fail without failing the stage; every other
         # tolerated step is a transfer that a later step repeats once.
         diagnostic = [step for step in tolerated if step.startswith('name: Save ')]
-        self.assertEqual([step.split('\n', 1)[0] for step in diagnostic], ['name: Save stage logs'])
+        self.assertEqual([step.split('\n', 1)[0] for step in diagnostic],
+                         ['name: Save source resolution and GN configuration', 'name: Save stage logs'])
         retried = [step for step in tolerated if step not in diagnostic]
         self.assertEqual(len(retried), 3)
         for step in retried:

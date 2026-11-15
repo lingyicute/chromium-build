@@ -78,6 +78,8 @@ jobs:
             | tee "$RUNNER_TEMP/chromium-logs/prepare.log"
       - name: Save source resolution and GN configuration
         if: inputs.stage == '00'
+        # A record only: the same metadata travels in the checkpoint and ships with the APK.
+        continue-on-error: true
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: source-lock-${{ github.run_id }}-${{ github.run_attempt }}
