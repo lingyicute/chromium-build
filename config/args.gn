@@ -14,6 +14,9 @@ enable_java_asserts = false
 # config.gni marks non-official APKs android:debuggable="true", exposing app
 # data via adb/run-as and disabling ART release optimizations.
 debuggable_apks = false
+# Unbranded Android builds otherwise enable testing/variations/fieldtrial_testing_config.json
+# experiments by default instead of shipping Stable's hardcoded feature defaults.
+disable_fieldtrial_testing_config = true
 android_channel = "default"
 
 # Keep the build local and checkpoint-compatible.
