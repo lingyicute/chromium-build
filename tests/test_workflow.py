@@ -462,6 +462,15 @@ class StaticPolicy(unittest.TestCase):
         self.assertIn('apk="$CR_ROOT/src/out/Release/apks/ChromePublic.apk"\n',
                       (ROOT / '.github/scripts/release.sh').read_text())
 
+    def test_retried_download_still_leaves_compile_budget(self):
+        stage = (ROOT / '.github/workflows/chromium-stage.yml').read_text()
+        steps = re.split(r'\n      - ', stage.split('\n    steps:\n', 1)[1])
+        minutes = [int(re.search(r'timeout-minutes: (\d+)', step)[1]) for step in steps
+                   if "if: inputs.stage != '00'" in step and 'timeout-minutes' in step]
+        # Download, its one retry, and restore: even the worst case must leave time to compile.
+        self.assertEqual(minutes, [70, 70, 40])
+        self.assertLess(sum(minutes) * 60 + build.MIN_BUDGET_SECONDS, build.NORMAL_JOB_DEADLINE_SECONDS)
+
     def test_final_stage_and_budget_invariants(self):
         stable = (ROOT / '.github/workflows/chromium-stable.yml').read_text()
         stage = (ROOT / '.github/workflows/chromium-stage.yml').read_text()
