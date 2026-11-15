@@ -35,6 +35,7 @@ solutions = [{
     'checkout_js_coverage_modules': False,
     'checkout_pgo_profiles': False,
     'checkout_instrumented_libraries': False,
+    'generate_location_tags': False,
   },
 }]
 target_os = ['android']

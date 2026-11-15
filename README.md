@@ -73,7 +73,7 @@ result：只有确实完成且必要 job 未失败才算成功
 
 每段的 job summary 会列出编译前准备（清理、同步或下载与恢复）与编译各自的耗时、编译期间写入 swap 的数据量与编译结束时构建盘的剩余空间，以及检查点打包、恢复的体积与吞吐；`metadata/runners.jsonl` 同样记录 `setup_seconds`、`swap_out_mib` 与 `disk_free_gib`。编译失败时，swap 写入量与剩余空间也会写进错误信息，便于区分内存压力（OOM）、磁盘写满与真正的编译错误。跑过一次真实构建后，可据此判断约 85 分钟的预留是否过宽、`-j` 上限是否合适，再调整 `build.py` 中的截止点、并行度与工作流里的步骤时限。
 
-检查点含源码、`.git`、GN/Ninja 中间产物、depot_tools、vpython 缓存和隐藏文件（临时 `CIPD_CACHE_DIR` 下载缓存在 `fetch.sh` 结束时直接清理，不进入检查点；`.gclient` 使用 `checkout_configuration="small"` 并关闭 JS 覆盖率模块以缩减体积，`config/args.gn` 锁定 `concurrent_links = 1` 防止并发链接 OOM）。归档使用 POSIX tar 保留纳秒 mtime、符号链接与权限（打包前仅为只读目录补齐 `u+w` 以便删除），经 `zstd` 以全部逻辑 CPU 压缩（`-T0` 只按物理核计数，在每核双线程的 hosted runner 上只会用到一半 vCPU）后，边按 1 GiB 分块写入边计算每块 SHA-256，并生成记录各块摘要与大小的 `tree.manifest`；传给下一段的是该清单的 SHA-256。导出时删除已归档的源文件；恢复时先认证清单，再逐块“验证 → 解包 → 删除”：未经验证的字节不会进入 zstd/tar，每块只需读盘一次（下一块在后台线程提前校验），不必先整体读一遍算摘要、再整体读一遍解包。
+检查点含源码、`.git`、GN/Ninja 中间产物、depot_tools、vpython 缓存和隐藏文件（临时 `CIPD_CACHE_DIR` 下载缓存在 `fetch.sh` 结束时直接清理，不进入检查点；`.gclient` 使用 `checkout_configuration="small"` 并关闭 JS 覆盖率模块与测试用 `generate_location_tags` 钩子以缩减体积，`config/args.gn` 锁定 `concurrent_links = 1` 防止并发链接 OOM）。归档使用 POSIX tar 保留纳秒 mtime、符号链接与权限（打包前仅为只读目录补齐 `u+w` 以便删除），经 `zstd` 以全部逻辑 CPU 压缩（`-T0` 只按物理核计数，在每核双线程的 hosted runner 上只会用到一半 vCPU）后，边按 1 GiB 分块写入边计算每块 SHA-256，并生成记录各块摘要与大小的 `tree.manifest`；传给下一段的是该清单的 SHA-256。导出时删除已归档的源文件；恢复时先认证清单，再逐块“验证 → 解包 → 删除”：未经验证的字节不会进入 zstd/tar，每块只需读盘一次（下一块在后台线程提前校验），不必先整体读一遍算摘要、再整体读一遍解包。
 
 Android stable 的版本不是写死的；每次新 workflow run 从官方 API 解析一次，再锁定源码提交。运行期间版本不会漂移。官方 tag 与 API 暂时不一致会失败，不会猜测另一个版本。
 
