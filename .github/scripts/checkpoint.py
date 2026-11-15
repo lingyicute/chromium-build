@@ -183,6 +183,19 @@ def restore_stream(directory, expected, out_stream):
     return len(entries), total_bytes
 
 
+def report(message):
+    """Log to stderr and, best effort, to the Actions job summary."""
+    print(message, file=sys.stderr)
+    path = os.environ.get('GITHUB_STEP_SUMMARY')
+    if not path:
+        return
+    try:
+        with open(path, 'a') as f:
+            f.write(f'- {message}\n')
+    except OSError:
+        pass
+
+
 def main():
     args = sys.argv[1:]
     if len(args) < 2:
@@ -200,14 +213,14 @@ def main():
         sha256, count, total = pack_stream(directory, sys.stdin.buffer, chunk_size=chunk_size)
         elapsed = max(time.monotonic() - t0, 1e-6)
         rate = total / (1024 * 1024) / elapsed
-        print(f'Packed {count} checkpoint part(s), {total} bytes ({total / 2**30:.2f} GiB) in {elapsed:.1f}s ({rate:.1f} MiB/s)', file=sys.stderr)
+        report(f'Packed {count} checkpoint part(s), {total} bytes ({total / 2**30:.2f} GiB) in {elapsed:.1f}s ({rate:.1f} MiB/s)')
         print(sha256)
     elif operation == 'restore-stream' and len(args) == 2:
         t0 = time.monotonic()
         count, total = restore_stream(directory, os.environ['EXPECTED_SHA256'], sys.stdout.buffer)
         elapsed = max(time.monotonic() - t0, 1e-6)
         rate = total / (1024 * 1024) / elapsed
-        print(f'Verified and streamed {count} checkpoint part(s), {total} bytes ({total / 2**30:.2f} GiB) in {elapsed:.1f}s ({rate:.1f} MiB/s)', file=sys.stderr)
+        report(f'Verified and streamed {count} checkpoint part(s), {total} bytes ({total / 2**30:.2f} GiB) in {elapsed:.1f}s ({rate:.1f} MiB/s)')
     else:
         raise ValueError('Unknown operation or invalid arguments')
 

@@ -195,11 +195,25 @@ class Checkpoint(unittest.TestCase):
                 checkpoint.pack_stream(Path(tmp), io.BytesIO(b''), chunk_size=4)
             self.assertEqual(list(Path(tmp).iterdir()), [])
 
-    def consume(self, expected):
-        return subprocess.run(
-            [sys.executable, str(ROOT / '.github/scripts/checkpoint.py'),
-             'restore-stream', str(self.root)],
-            env=dict(os.environ, EXPECTED_SHA256=expected), capture_output=True)
+    def cli(self, *args, summary='', **kwargs):
+        # Never write test noise into a real job summary when these tests run on Actions.
+        env = dict(os.environ, GITHUB_STEP_SUMMARY=str(summary), **kwargs.pop('env', {}))
+        return subprocess.run([sys.executable, str(ROOT / '.github/scripts/checkpoint.py'), *args],
+                              env=env, capture_output=True, **kwargs)
+
+    def consume(self, expected, **kwargs):
+        return self.cli('restore-stream', str(self.root), env=dict(EXPECTED_SHA256=expected), **kwargs)
+
+    def test_cli_reports_throughput_to_job_summary(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            summary = Path(tmp) / 'summary'
+            (Path(tmp) / 'out').mkdir()
+            p = self.cli('pack-stream', str(Path(tmp) / 'out'), '--chunk-size', '4', summary=summary, input=b'12345678')
+            self.assertEqual(p.returncode, 0, p.stderr)
+            self.assertRegex(p.stdout, rb'^[0-9a-f]{64}\n$')
+            self.assertEqual(self.consume(self.expected, summary=summary).returncode, 0)
+            self.assertRegex(summary.read_text(), r'^- Packed 2 checkpoint part\(s\), 8 bytes .* MiB/s\)\n'
+                                                  r'- Verified and streamed 2 checkpoint part\(s\), 11 bytes .* MiB/s\)\n$')
 
     def test_consume_verified_chunks(self):
         p = self.consume(self.expected)
