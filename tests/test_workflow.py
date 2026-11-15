@@ -677,6 +677,198 @@ class ResultVerdict(unittest.TestCase):
         self.assertIn('`part-01` built the APK', summary)
         self.assertIn('`unverified-apk-*`', summary)
 
+    def test_completed_status_without_success_result_fails(self):
+        ok, _ = self.verdict(prepare=('success', 'running'), part_01=('unknown', 'completed'))
+        self.assertFalse(ok)
+
+
+class Hardening(unittest.TestCase):
+    def test_resolve_retry_after_and_validation(self):
+        import datetime
+
+        now = datetime.datetime(2026, 11, 15, 12, 0, 0, tzinfo=datetime.timezone.utc)
+        self.assertEqual(resolve._retry_delay(1, 2.0, {'retry-after': '12'}), 12.0)
+        self.assertEqual(resolve._retry_delay(1, 2.0, {'RETRY-AFTER': '999'}), resolve.MAX_RETRY_AFTER_SECONDS)
+        self.assertEqual(
+            resolve._retry_delay(1, 2.0, {'Retry-After': 'Sun, 15 Nov 2026 12:00:25 GMT'}, now=now), 25.0)
+        self.assertEqual(
+            resolve._retry_delay(1, 2.0, {'Retry-After': 'Sun, 15 Nov 2026 11:59:00 GMT'}, now=now), 0.0)
+
+        err429 = urllib.error.HTTPError(resolve.URL, 429, 'Too Many Requests', {'Retry-After': '0'}, None)
+        err408 = urllib.error.HTTPError(resolve.URL, 408, 'Request Timeout', {}, None)
+        opener = _FakeOpener([err429, err408, _FakeResponse(b'[1]')])
+        self.assertEqual(resolve.fetch_release_json(attempts=3, retry_delay=0.0, opener=opener), b'[1]')
+        self.assertEqual(opener.calls, 3)
+
+        bad_status = _FakeResponse(b'[]')
+        bad_status.status = 204
+        with self.assertRaises(ValueError):
+            resolve.fetch_release_json(attempts=1, retry_delay=0.0, opener=_FakeOpener([bad_status]))
+        with self.assertRaises(ValueError):
+            resolve.fetch_release_json(attempts=1, retry_delay=0.0, opener=_FakeOpener([_FakeResponse(b'')]))
+
+        for kwargs in (dict(attempts=True), dict(attempts=0), dict(timeout=True), dict(timeout=0),
+                       dict(timeout=float('nan')), dict(timeout=float('inf')),
+                       dict(retry_delay=True), dict(retry_delay=float('nan'))):
+            with self.assertRaises(ValueError, msg=str(kwargs)):
+                resolve.fetch_release_json(**kwargs, opener=_FakeOpener([]))
+
+    def test_checkpoint_manifest_and_part_hardening(self):
+        from unittest import mock
+
+        with tempfile.TemporaryDirectory() as tmp:
+            dest = Path(tmp)
+            for bad in (True, 0, -1, 1.5):
+                with self.assertRaises(ValueError):
+                    checkpoint.pack_stream(dest, io.BytesIO(b'abc'), chunk_size=bad)
+
+            class _FailingStream:
+                def __init__(self):
+                    self.calls = 0
+
+                def readinto(self, buf):
+                    self.calls += 1
+                    if self.calls == 1:
+                        buf[:4] = b'abcd'
+                        return 4
+                    raise OSError('stream failed')
+
+            with self.assertRaises(OSError):
+                checkpoint.pack_stream(dest, _FailingStream(), chunk_size=4)
+            self.assertEqual(list(dest.iterdir()), [])
+
+            sha, _, _ = checkpoint.pack_stream(dest, io.BytesIO(b'abcdefgh'), chunk_size=4)
+            with mock.patch.object(checkpoint, 'MAX_MANIFEST_BYTES', 16):
+                with self.assertRaises(ValueError):
+                    checkpoint.manifest(dest, sha)
+
+            non_ascii = b'\xff' * 10
+            (dest / checkpoint.MANIFEST).write_bytes(non_ascii)
+            with self.assertRaises(ValueError):
+                checkpoint.manifest(dest, hashlib.sha256(non_ascii).hexdigest())
+
+            link = dest / 'sym'
+            link.symlink_to(dest / 'tree.part-00000')
+            with self.assertRaises(ValueError):
+                checkpoint._open_regular_ro(link)
+
+    def test_supervise_races_and_failure_summaries(self):
+        from unittest import mock
+
+        class _ExitedBeforeSigint:
+            pid = 99999
+
+            def __init__(self):
+                self._waits = 0
+                self._polled = False
+
+            def wait(self, timeout=None):
+                self._waits += 1
+                if self._waits == 1:
+                    raise subprocess.TimeoutExpired(['fake'], timeout)
+                return 2
+
+            def poll(self):
+                if not self._polled:
+                    self._polled = True
+                    return None
+                return 2
+
+        with mock.patch.object(build.subprocess, 'Popen', return_value=_ExitedBeforeSigint()), \
+             mock.patch.object(build.os, 'killpg', side_effect=ProcessLookupError), \
+             mock.patch.object(build, 'kill_session', return_value=[]):
+            self.assertEqual(build.supervise(['fake'], 0.1, 1), 'failed:2')
+
+        with mock.patch.object(build, 'kill_session', return_value=[42424]):
+            self.assertEqual(
+                build.supervise([sys.executable, '-c', 'pass'], 5, 1),
+                'failed:lingering-processes(42424)',
+            )
+
+        sup = Supervisor()
+        p, files = sup.run_main('exit 1')
+        self.assertNotEqual(p.returncode, 0)
+        self.assertRegex(files['summary'], r'^- Stage 03: `failed:1` after compiling .*'
+                                           r'\n- Stage 03 resources: .* GiB left free on the build disk\.\n$')
+        p, files = sup.run_main('exit 0', started_minutes_ago=build.NORMAL_JOB_DEADLINE_SECONDS // 60)
+        self.assertNotEqual(p.returncode, 0)
+        self.assertIn('- Stage 03: `failed` before compiling;', files['summary'])
+
+    def test_retry_signal_exit_codes_and_base10_delay(self):
+        retry_test = Retry()
+        for code in (130, 143):
+            p = retry_test.run_retry(f'n=0; stop() {{ n=$((n+1)); return {code}; }}; retry stop; echo "n=$n"')
+            self.assertEqual(p.returncode, code)
+            self.assertNotIn('::warning::', p.stderr)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            p = subprocess.run(
+                ['bash', '-c',
+                 'source "$1/common.sh"; sleep() { echo "slept=$1"; }; '
+                 'n=0; flaky() { n=$((n+1)); (( n >= 2 )); }; retry flaky',
+                 '_', str(ROOT / '.github/scripts')],
+                env=dict(os.environ, RUNNER_TEMP=tmp, CR_RETRY_DELAY='08'),
+                capture_output=True, text=True, cwd=tmp)
+            self.assertEqual(p.returncode, 0, p.stderr)
+            self.assertEqual(p.stdout.strip(), 'slept=8')
+
+    def test_args_gn_and_prepare_log_policy(self):
+        args_gn = (ROOT / 'config/args.gn').read_text()
+        self.assertIn('\nenable_java_asserts = false\n', args_gn)
+        self.assertIn('\ndebuggable_apks = false\n', args_gn)
+        stage = (ROOT / '.github/workflows/chromium-stage.yml').read_text()
+        self.assertIn('| tee -i "$RUNNER_TEMP/chromium-logs/prepare.log"', stage)
+
+    def test_release_apk_checks(self):
+        import zipfile
+
+        release_sh = (ROOT / '.github/scripts/release.sh').read_text()
+        script = re.search(r'"\$CR_PYTHON" - "\$apk" .* <<\'PY\'\n(.*?)\nPY\n', release_sh, re.S)[1]
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            apk = root / 'ChromePublic.apk'
+            with zipfile.ZipFile(apk, 'w') as zf:
+                zf.writestr('AndroidManifest.xml', b'manifest')
+                zf.writestr('classes.dex', b'dex')
+                zf.writestr('lib/arm64-v8a/libchrome.so', b'elf')
+            lock = root / 'build-lock.json'
+            lock.write_text(json.dumps({'version': '158.0.8127.36'}))
+            aapt2 = root / 'aapt2'
+            aapt2.write_text('#!/bin/sh\nprintf "%s\\n" "$FAKE_BADGING"\n')
+            aapt2.chmod(0o755)
+            meta = root / 'meta.json'
+
+            def run_check(badging, tool=aapt2):
+                return subprocess.run(
+                    [sys.executable, '-c', script, str(apk), str(lock), str(tool), str(meta)],
+                    env=dict(os.environ, FAKE_BADGING=badging),
+                    capture_output=True, text=True)
+
+            good = ("package: name='org.chromium.chrome' versionCode='1234' versionName='158.0.8127.36'\n"
+                    "sdkVersion:'29'\ntargetSdkVersion:'36'\nnative-code: 'arm64-v8a'")
+            p = run_check(good)
+            self.assertEqual(p.returncode, 0, p.stderr)
+            self.assertEqual(json.loads(meta.read_text()),
+                             {'package': 'org.chromium.chrome', 'version_code': '1234',
+                              'min_sdk': '29', 'target_sdk': '36'})
+
+            p = run_check(good + '\napplication-debuggable')
+            self.assertNotEqual(p.returncode, 0)
+            self.assertIn('debuggable', p.stderr)
+
+            p = run_check("package: name='org.chromium.chrome' versionName='158.0.8127.36'")
+            self.assertNotEqual(p.returncode, 0)
+            self.assertIn('missing native-code', p.stderr)
+
+            p = run_check("package: name='org.chromium.chrome' versionName='158.0.8127.36'\nnative-code: 'armeabi-v7a'")
+            self.assertNotEqual(p.returncode, 0)
+            self.assertIn('arm64-v8a', p.stderr)
+
+            p = run_check(good, tool=root / 'missing-aapt2')
+            self.assertNotEqual(p.returncode, 0)
+            self.assertIn('aapt2 missing', p.stderr)
+
 
 if __name__ == '__main__':
     unittest.main()
