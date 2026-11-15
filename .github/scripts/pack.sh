@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
 source "$(dirname "$0")/common.sh"
+# Export using only OS tools, never depot_tools wrappers inside $CR_ROOT.
+export PATH="/usr/bin:/bin:/usr/sbin:/sbin"
 [[ "$CR_ROOT" == /mnt/chromium-relay && "$CR_TRANSFER" == /mnt/chromium-transfer ]] \
   || fail 'Refusing destructive export outside the fixed /mnt checkpoint paths'
 mkdir -p "$CR_TRANSFER/checkpoint"
@@ -22,7 +24,7 @@ hash=$(
     (( ${#entries[@]} > 0 )) && \
     tar --format=posix --pax-option=delete=atime,delete=ctime --remove-files -cf - -- "${entries[@]}" ) \
     | zstd -T0 -3 -c \
-    | python3 "$GITHUB_WORKSPACE/.github/scripts/checkpoint.py" pack-stream "$CR_TRANSFER/checkpoint"
+    | "$CR_PYTHON" "$GITHUB_WORKSPACE/.github/scripts/checkpoint.py" pack-stream "$CR_TRANSFER/checkpoint"
 )
 [[ "$hash" =~ ^[0-9a-f]{64}$ ]] || fail 'Invalid checkpoint SHA-256 output'
 echo "sha256=$hash" >> "$GITHUB_OUTPUT"
