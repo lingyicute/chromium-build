@@ -74,6 +74,10 @@ buildtools/linux64/gn gen out/Release --fail-on-unused-args
 # Record GN's effective arguments, not just the overrides.
 buildtools/linux64/gn args out/Release --list --short > "$CR_ROOT/metadata/effective-args.txt"
 # Reclaim transient CIPD download cache and temp files before compiling.
-rm -rf "$CIPD_CACHE_DIR"
+if [[ -d "$CIPD_CACHE_DIR" ]]; then
+  find "$CIPD_CACHE_DIR" -type d ! -perm -u+w -exec chmod u+w {} +
+  rm -rf -- "$CIPD_CACHE_DIR"
+fi
+find "$TMPDIR" -mindepth 1 -type d ! -perm -u+w -exec chmod u+w {} +
 find "$TMPDIR" -mindepth 1 -delete
 df -h /mnt
