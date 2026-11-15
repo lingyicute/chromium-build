@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Resolve Android Stable ONCE. No executable code is read from release JSON."""
 import datetime
+import email.utils
 import http.client
 import json
 import os
@@ -43,13 +44,40 @@ def validate(releases):
     return version, revision
 
 
-def _retry_delay(attempt, retry_delay, headers=None):
+def _header_value(headers, name):
+    if headers is None:
+        return None
+    if hasattr(headers, 'get'):
+        val = headers.get(name)
+        if val is not None:
+            return val
+    if hasattr(headers, 'items'):
+        target = name.lower()
+        for k, v in headers.items():
+            if isinstance(k, str) and k.lower() == target:
+                return v
+    return None
+
+
+def _retry_delay(attempt, retry_delay, headers=None, now=None):
     if retry_delay <= 0:
         return 0.0
-    if headers is not None:
-        raw_after = headers.get('Retry-After') if hasattr(headers, 'get') else None
-        if isinstance(raw_after, str) and re.fullmatch(r'[0-9]+', raw_after.strip()):
-            return min(float(raw_after.strip()), MAX_RETRY_AFTER_SECONDS)
+    raw_after = _header_value(headers, 'Retry-After')
+    if isinstance(raw_after, str):
+        text = raw_after.strip()
+        if re.fullmatch(r'[0-9]+', text):
+            return min(float(text), MAX_RETRY_AFTER_SECONDS)
+        if text:
+            try:
+                target = email.utils.parsedate_to_datetime(text)
+            except (TypeError, ValueError, OverflowError):
+                target = None
+            if target is not None:
+                if target.tzinfo is None:
+                    target = target.replace(tzinfo=datetime.timezone.utc)
+                ref = now if now is not None else datetime.datetime.now(datetime.timezone.utc)
+                delta = (target - ref).total_seconds()
+                return max(0.0, min(delta, MAX_RETRY_AFTER_SECONDS))
     return retry_delay * (2 ** (attempt - 1))
 
 
