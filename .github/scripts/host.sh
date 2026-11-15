@@ -38,6 +38,9 @@ sudo fallocate -l "${swap_gib}G" /chromium-relay.swap
 sudo chmod 600 /chromium-relay.swap
 sudo mkswap /chromium-relay.swap >/dev/null
 sudo swapon /chromium-relay.swap
+if [[ -e /proc/sys/vm/swappiness ]]; then
+  printf '10\n' | sudo tee /proc/sys/vm/swappiness >/dev/null
+fi
 /usr/bin/python3 - <<'PY'
 import shutil
 free = shutil.disk_usage('/mnt/chromium-relay').free / 2**30
@@ -47,4 +50,5 @@ if free < 45:
 if free < 100:
     print('::warning::Below Chromium documented 100 GB free disk requirement; best-effort build only.')
 PY
-{ df -hT / /mnt; free -h; swapon --show; printf 'CPUs=%s\nImageOS=%s\nImageVersion=%s\n' "$(nproc)" "${ImageOS:-unknown}" "${ImageVersion:-unknown}"; } | tee "$RUNNER_TEMP/chromium-logs/host.txt"
+swappiness=$(cat /proc/sys/vm/swappiness 2>/dev/null || echo unknown)
+{ df -hT / /mnt; free -h; swapon --show; printf 'CPUs=%s\nSwappiness=%s\nImageOS=%s\nImageVersion=%s\n' "$(nproc)" "$swappiness" "${ImageOS:-unknown}" "${ImageVersion:-unknown}"; } | tee "$RUNNER_TEMP/chromium-logs/host.txt"
