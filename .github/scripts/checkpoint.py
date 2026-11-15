@@ -6,6 +6,7 @@ from pathlib import Path
 import re
 import stat
 import sys
+import time
 
 CHUNK_SIZE = 1024 * 1024 * 1024  # 1 GiB
 IO_BUFFER = 8 * 1024 * 1024      # 8 MiB
@@ -13,7 +14,10 @@ MAX_PARTS = 100000
 
 
 def parts(directory):
-    files = sorted(Path(directory).iterdir())
+    try:
+        files = sorted(Path(directory).iterdir())
+    except OSError as exc:
+        raise ValueError('Checkpoint directory unreadable') from exc
     if not files:
         raise ValueError('Checkpoint parts missing, unexpected, or non-contiguous')
     for n, p in enumerate(files):
@@ -99,6 +103,7 @@ def restore_stream(directory, expected, out_stream):
     verify(files, expected)
     buf = bytearray(IO_BUFFER)
     view = memoryview(buf)
+    total_bytes = 0
     # Unlink each compressed chunk after it is consumed to reduce peak disk.
     # Downstream failure loses this disposable local copy, NOT the artifact.
     for p in files:
@@ -108,8 +113,10 @@ def restore_stream(directory, expected, out_stream):
                 if not n:
                     break
                 out_stream.write(view[:n])
+                total_bytes += n
         out_stream.flush()
         p.unlink()
+    return len(files), total_bytes
 
 
 def main():
@@ -125,11 +132,18 @@ def main():
             if args[2] != '--chunk-size':
                 raise ValueError('Unknown option')
             chunk_size = int(args[3])
+        t0 = time.monotonic()
         sha256, count, total = pack_stream(directory, sys.stdin.buffer, chunk_size=chunk_size)
-        print(f'Packed {count} checkpoint part(s), {total} bytes total', file=sys.stderr)
+        elapsed = max(time.monotonic() - t0, 1e-6)
+        rate = total / (1024 * 1024) / elapsed
+        print(f'Packed {count} checkpoint part(s), {total} bytes ({total / 2**30:.2f} GiB) in {elapsed:.1f}s ({rate:.1f} MiB/s)', file=sys.stderr)
         print(sha256)
     elif operation == 'restore-stream' and len(args) == 2:
-        restore_stream(directory, os.environ['EXPECTED_SHA256'], sys.stdout.buffer)
+        t0 = time.monotonic()
+        count, total = restore_stream(directory, os.environ['EXPECTED_SHA256'], sys.stdout.buffer)
+        elapsed = max(time.monotonic() - t0, 1e-6)
+        rate = total / (1024 * 1024) / elapsed
+        print(f'Verified and streamed {count} checkpoint part(s), {total} bytes ({total / 2**30:.2f} GiB) in {elapsed:.1f}s ({rate:.1f} MiB/s)', file=sys.stderr)
     else:
         raise ValueError('Unknown operation or invalid arguments')
 
