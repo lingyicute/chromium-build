@@ -47,8 +47,12 @@ pkg_text = pkg_line.group(1)
 ver_match = re.search(r"versionName='([^']+)'", pkg_text)
 if not ver_match or ver_match.group(1) != lock['version']:
     raise SystemExit(f"APK versionName mismatch: {ver_match.group(1) if ver_match else 'missing'} != {lock['version']}")
+if re.search(r'^application-debuggable\b', badging, re.M):
+    raise SystemExit('APK must not be debuggable (android:debuggable=true)')
 abi_line = re.search(r'^native-code:\s*(.+)$', badging, re.M)
-if abi_line and "'arm64-v8a'" not in abi_line.group(1):
+if not abi_line:
+    raise SystemExit('aapt2 output missing native-code line')
+if 'arm64-v8a' not in re.findall(r"'([^']+)'", abi_line.group(1)):
     raise SystemExit(f'APK native-code missing arm64-v8a: {abi_line.group(1)}')
 
 pkg_name = re.search(r"name='([^']+)'", pkg_text)
