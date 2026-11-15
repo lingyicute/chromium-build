@@ -1,6 +1,7 @@
 """Offline smoke tests. Python stdlib only; does NOT compile Chromium."""
 import hashlib
 import importlib.util
+import io
 import os
 from pathlib import Path
 import re
@@ -8,6 +9,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+import urllib.error
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -24,6 +26,34 @@ checkpoint = load('checkpoint')
 build = load('build')
 
 
+class _FakeResponse:
+    def __init__(self, body, url=resolve.URL):
+        self._body = body
+        self.url = url
+
+    def read(self, size=-1):
+        return self._body if size < 0 else self._body[:size]
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *args):
+        return False
+
+
+class _FakeOpener:
+    def __init__(self, outcomes):
+        self._outcomes = list(outcomes)
+        self.calls = 0
+
+    def open(self, req, timeout=None):
+        self.calls += 1
+        outcome = self._outcomes.pop(0)
+        if isinstance(outcome, BaseException):
+            raise outcome
+        return outcome
+
+
 class Resolution(unittest.TestCase):
     def sample(self):
         return [dict(channel='Stable', platform='Android', version='155.0.8059.79',
@@ -34,7 +64,8 @@ class Resolution(unittest.TestCase):
 
     def test_bad_input(self):
         for field, value in [('channel', 'Beta'), ('platform', 'Windows'),
-                             ('version', '155.0.1.2; echo injection')]:
+                             ('version', '155.0.1.2; echo injection'),
+                             ('version', 155), ('hashes', None), ('hashes', [])]:
             data = self.sample()
             data[0][field] = value
             with self.assertRaises(ValueError):
@@ -43,8 +74,42 @@ class Resolution(unittest.TestCase):
         data[0]['hashes']['chromium'] = 'main'
         with self.assertRaises(ValueError):
             resolve.validate(data)
+        data = self.sample()
+        data[0]['hashes']['chromium'] = 12345
         with self.assertRaises(ValueError):
-            resolve.validate([])
+            resolve.validate(data)
+        for bad in ([], [None], ['string'], {}):
+            with self.assertRaises(ValueError):
+                resolve.validate(bad)
+
+    def test_fetch_retries_transient_5xx(self):
+        err503 = urllib.error.HTTPError(resolve.URL, 503, 'Service Unavailable', {}, None)
+        opener = _FakeOpener([err503, urllib.error.URLError('temp'), _FakeResponse(b'[]')])
+        raw = resolve.fetch_release_json(attempts=3, retry_delay=0.0, opener=opener)
+        self.assertEqual(raw, b'[]')
+        self.assertEqual(opener.calls, 3)
+
+    def test_fetch_does_not_retry_4xx_or_redirect(self):
+        err404 = urllib.error.HTTPError(resolve.URL, 404, 'Not Found', {}, None)
+        opener = _FakeOpener([err404, _FakeResponse(b'[]')])
+        with self.assertRaises(urllib.error.HTTPError):
+            resolve.fetch_release_json(attempts=3, retry_delay=0.0, opener=opener)
+        self.assertEqual(opener.calls, 1)
+
+        redir_opener = _FakeOpener([_FakeResponse(b'[]', url='https://evil.example/api')])
+        with self.assertRaises(ValueError):
+            resolve.fetch_release_json(attempts=3, retry_delay=0.0, opener=redir_opener)
+        self.assertEqual(redir_opener.calls, 1)
+
+    def test_no_redirect_handler_blocks_before_follow(self):
+        handler = resolve._NoRedirectHandler()
+        with self.assertRaises(ValueError):
+            handler.redirect_request(None, None, 302, 'Found', {}, 'https://evil.example/')
+
+    def test_fetch_rejects_oversized_response(self):
+        opener = _FakeOpener([_FakeResponse(b'x' * (resolve.MAX_BYTES + 1))])
+        with self.assertRaises(ValueError):
+            resolve.fetch_release_json(attempts=1, retry_delay=0.0, opener=opener)
 
 
 class Checkpoint(unittest.TestCase):
@@ -72,6 +137,11 @@ class Checkpoint(unittest.TestCase):
         with self.assertRaises(ValueError):
             checkpoint.parts(self.root)
 
+    def test_empty_part_rejected(self):
+        (self.root / 'tree.part-00002').write_bytes(b'')
+        with self.assertRaises(ValueError):
+            checkpoint.parts(self.root)
+
     def test_extra_file(self):
         (self.root / 'extra').touch()
         with self.assertRaises(ValueError):
@@ -83,6 +153,34 @@ class Checkpoint(unittest.TestCase):
         p.symlink_to(self.root / 'tree.part-00000')
         with self.assertRaises(ValueError):
             checkpoint.parts(self.root)
+
+    def test_pack_stream_and_restore_round_trip(self):
+        payload = b'abcdefghijk'  # 11 bytes -> 3 chunks with chunk_size=4
+        with tempfile.TemporaryDirectory() as tmp:
+            dest = Path(tmp)
+            sha, count, total = checkpoint.pack_stream(dest, io.BytesIO(payload), chunk_size=4)
+            self.assertEqual(sha, hashlib.sha256(payload).hexdigest())
+            self.assertEqual(count, 3)
+            self.assertEqual(total, len(payload))
+            self.assertEqual([p.name for p in checkpoint.parts(dest)],
+                             ['tree.part-00000', 'tree.part-00001', 'tree.part-00002'])
+            self.assertEqual(checkpoint.digest(checkpoint.parts(dest)), sha)
+            out = io.BytesIO()
+            checkpoint.restore_stream(dest, sha, out)
+            self.assertEqual(out.getvalue(), payload)
+            self.assertEqual(list(dest.iterdir()), [])
+
+    def test_pack_stream_exact_boundary_and_empty_rejected(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            dest = Path(tmp)
+            sha, count, total = checkpoint.pack_stream(dest, io.BytesIO(b'12345678'), chunk_size=4)
+            self.assertEqual((count, total), (2, 8))
+            self.assertEqual(sha, hashlib.sha256(b'12345678').hexdigest())
+            with self.assertRaises(ValueError):
+                checkpoint.pack_stream(dest, io.BytesIO(b'more'), chunk_size=4)
+        with tempfile.TemporaryDirectory() as tmp:
+            with self.assertRaises(ValueError):
+                checkpoint.pack_stream(Path(tmp), io.BytesIO(b''), chunk_size=4)
 
     def consume(self, expected):
         return subprocess.run(
@@ -103,7 +201,7 @@ class Checkpoint(unittest.TestCase):
         self.assertEqual(len(list(self.root.iterdir())), 2)
 
     def test_tar_metadata_round_trip(self):
-        # Tests real GNU tar without compression, not zstd or GitHub storage.
+        # Tests real GNU tar without compression, including nested read-only dirs.
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             src = root / 'src'
@@ -115,11 +213,27 @@ class Checkpoint(unittest.TestCase):
             (src / 'tool').write_text('executable')
             (src / 'tool').chmod(0o755)
             (src / 'link').symlink_to('tool')
+            ro_parent = src / 'ro_parent'
+            ro_child = ro_parent / 'ro_child'
+            ro_child.mkdir(parents=True)
+            ro_file = ro_child / 'readonly.txt'
+            ro_file.write_text('immutable')
+            os.utime(ro_file, ns=(ns, ns))
+            ro_file.chmod(0o444)
+            os.utime(ro_child, ns=(ns, ns))
+            ro_child.chmod(0o555)
+            os.utime(ro_parent, ns=(ns, ns))
+            ro_parent.chmod(0o555)
             archive = root / 'test.tar'
-            # Same archive form as pack.sh: the entries of the root, never "." itself.
-            subprocess.run(['bash', '-c', 'cd "$1" && shopt -s dotglob && tar --format=posix '
-                            '--pax-option=delete=atime,delete=ctime --remove-files -cf "$2" -- *',
-                            '_', str(src), str(archive)], check=True)
+            # Same archive form as pack.sh: chmod u+w on read-only dirs, then tar entries.
+            subprocess.run(
+                ['bash', '-c',
+                 'find "$1" -mindepth 1 -type d ! -perm -u+w -exec chmod u+w {} + && '
+                 'cd "$1" && shopt -s dotglob nullglob && entries=(*) && '
+                 'tar --format=posix --pax-option=delete=atime,delete=ctime '
+                 '--remove-files -cf "$2" -- "${entries[@]}"',
+                 '_', str(src), str(archive)],
+                check=True)
             self.assertTrue(src.exists())
             self.assertEqual(list(src.iterdir()), [])
             subprocess.run(['tar', '--no-same-owner', '-xpf', str(archive), '-C', str(src)], check=True)
@@ -127,6 +241,10 @@ class Checkpoint(unittest.TestCase):
             self.assertEqual((src / '.ninja_log').read_text(), 'state')
             self.assertTrue((src / 'link').is_symlink())
             self.assertTrue(os.access(src / 'tool', os.X_OK))
+            restored_ro = src / 'ro_parent/ro_child/readonly.txt'
+            self.assertEqual(restored_ro.stat().st_mtime_ns, ns)
+            self.assertEqual(restored_ro.stat().st_mode & 0o777, 0o444)
+            self.assertEqual(restored_ro.read_text(), 'immutable')
 
 
 class Deadline(unittest.TestCase):
@@ -151,6 +269,32 @@ class Deadline(unittest.TestCase):
     def test_unresponsive_deadline(self):
         code = 'import signal,time; signal.signal(signal.SIGINT,signal.SIG_IGN); time.sleep(20)'
         self.assertEqual(self.run_command(code, 0.5, 0.1), 'failed:shutdown-timeout')
+
+    def test_kill_session_reaps_detached_pgrp_child(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            pidfile = Path(tmp) / 'child.pid'
+            parent_code = (
+                'import os, subprocess, sys, time\n'
+                'c = subprocess.Popen([sys.executable, "-c", "import os,time; os.setpgrp(); time.sleep(30)"])\n'
+                f'open({str(pidfile)!r}, "w").write(str(c.pid))\n'
+                'time.sleep(0.2)\n'
+            )
+            self.assertEqual(self.run_command(parent_code, seconds=5, grace=1), 'completed')
+            child_pid = int(pidfile.read_text())
+            with self.assertRaises(ProcessLookupError):
+                os.kill(child_pid, 0)
+
+    def test_compute_jobs(self):
+        self.assertEqual(build.compute_jobs(cpu_count=4, mem_kib=16 * 1024 * 1024), 4)
+        self.assertEqual(build.compute_jobs(cpu_count=2, mem_kib=7 * 1024 * 1024), 2)
+        self.assertEqual(build.compute_jobs(cpu_count=8, mem_kib=16 * 1024 * 1024), 4)
+        self.assertEqual(build.compute_jobs(cpu_count=4, mem_kib=2 * 1024 * 1024), 1)
+
+    def test_compute_budget(self):
+        self.assertEqual(build.compute_budget(1000, 1000 + 30 * 60, final_stage=False), 210 * 60)
+        self.assertEqual(build.compute_budget(1000, 1000 + 80 * 60, final_stage=False), 185 * 60)
+        self.assertEqual(build.compute_budget(1000, 1000 + 30 * 60, final_stage=True), 270 * 60)
+        self.assertEqual(build.compute_budget(1000, 1000 + 80 * 60, final_stage=True), 250 * 60)
 
 
 class StaticPolicy(unittest.TestCase):
@@ -180,6 +324,17 @@ class StaticPolicy(unittest.TestCase):
             for bad in ['pull_request_target:', 'pull_request:', 'secrets.', 'secrets: inherit',
                         'contents: write', 'actions: write', 'id-token: write']:
                 self.assertNotIn(bad, p.read_text())
+
+    def test_final_stage_and_budget_invariants(self):
+        stable = (ROOT / '.github/workflows/chromium-stable.yml').read_text()
+        stage = (ROOT / '.github/workflows/chromium-stage.yml').read_text()
+        self.assertEqual(len(re.findall(r'^\s+final:\s*true\s*$', stable, re.M)), 1)
+        self.assertRegex(stable, r'part-08:[\s\S]*?final:\s*true[\s\S]*?result:')
+        self.assertIn("if: steps.build.outputs.status == 'running' && !inputs.final", stage)
+        # Normal stage worst-case: 265m budget + 3m grace + 45m pack + 35m upload = 348m < 350m.
+        self.assertLessEqual(build.NORMAL_JOB_DEADLINE_SECONDS // 60 + 3 + 45 + 35, 350)
+        # Final stage worst-case: 330m budget + 3m grace + 10m release/upload < 350m.
+        self.assertLessEqual(build.FINAL_JOB_DEADLINE_SECONDS // 60 + 3 + 10, 350)
 
 
 if __name__ == '__main__':
