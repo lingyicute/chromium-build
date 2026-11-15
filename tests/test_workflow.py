@@ -472,6 +472,12 @@ class StaticPolicy(unittest.TestCase):
         for p in (ROOT / '.github/scripts').glob('*.sh'):
             subprocess.run(['bash', '-n', str(p)], check=True)
 
+    def test_checkpoint_compression_uses_every_logical_cpu(self):
+        # zstd -T0 means physical cores: only half the vCPUs of an SMT hosted runner.
+        pack = (ROOT / '.github/scripts/pack.sh').read_text()
+        self.assertIn('| zstd -T"$(nproc)" -3 -c', pack)
+        self.assertNotRegex(pack, r'(?m)^[^#\n]*zstd[^#\n]*-T0\b')
+
     def test_no_unsafe_triggers_or_secrets(self):
         for p in (ROOT / '.github/workflows').glob('*.yml'):
             for bad in ['pull_request_target:', 'pull_request:', 'secrets.', 'secrets: inherit',

@@ -19,11 +19,13 @@ find "$CR_ROOT" -mindepth 1 -type d ! -perm -u+w -exec chmod u+w {} +
 # itself: with --remove-files tar would finish by rmdir'ing $CR_ROOT, which is
 # denied because /mnt belongs to root, and tar's exit status 2 would abort the
 # pipeline after the complete archive had already been written.
+# zstd -T0 counts physical cores only (half the vCPUs of an SMT hosted runner),
+# so ask for one worker per logical CPU: nothing else runs during the export.
 hash=$(
   ( cd "$CR_ROOT" && shopt -s dotglob nullglob && entries=(*) && \
     (( ${#entries[@]} > 0 )) && \
     tar --format=posix --pax-option=delete=atime,delete=ctime --remove-files -cf - -- "${entries[@]}" ) \
-    | zstd -T0 -3 -c \
+    | zstd -T"$(nproc)" -3 -c \
     | "$CR_PYTHON" "$GITHUB_WORKSPACE/.github/scripts/checkpoint.py" pack-stream "$CR_TRANSFER/checkpoint"
 )
 [[ "$hash" =~ ^[0-9a-f]{64}$ ]] || fail 'Invalid checkpoint SHA-256 output'
