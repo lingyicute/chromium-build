@@ -8,6 +8,7 @@ import re
 import subprocess
 import sys
 import tempfile
+import textwrap
 import unittest
 import urllib.error
 
@@ -363,6 +364,37 @@ class StaticPolicy(unittest.TestCase):
         self.assertLessEqual(build.NORMAL_JOB_DEADLINE_SECONDS // 60 + 3 + 45 + 35, 350)
         # Final stage worst-case: 330m budget + 3m grace + 10m release/upload < 350m.
         self.assertLessEqual(build.FINAL_JOB_DEADLINE_SECONDS // 60 + 3 + 10, 350)
+
+    def test_prepare_compiles_as_stage_00(self):
+        stable = (ROOT / '.github/workflows/chromium-stable.yml').read_text()
+        stage = (ROOT / '.github/workflows/chromium-stage.yml').read_text()
+        prepare = re.search(r'^  prepare:\n((?:    .*\n)+)', stable, re.M)[1]
+        self.assertIn('uses: ./.github/workflows/chromium-stage.yml', prepare)
+        self.assertIn("stage: '00'", prepare)
+        self.assertNotIn('artifact-id', prepare)
+        self.assertIn("if: ${{ needs.prepare.outputs.status == 'running' }}", stable)
+        for step, condition in [('Resolve stable, fetch locked source', "== '00'"),
+                                ('Save source resolution', "== '00'"),
+                                ('Download exact checkpoint ID', "!= '00'"),
+                                ('Verify producer hash', "!= '00'")]:
+            self.assertRegex(stage, re.escape(step) + r'.*\n\s+if: inputs\.stage ' + re.escape(condition) + r'\n')
+
+    def test_stage_input_validation(self):
+        stage = (ROOT / '.github/workflows/chromium-stage.yml').read_text()
+        script = textwrap.dedent(re.search(r"python3 - <<'PY'\n(.*?)\n *PY\n", stage, re.S)[1])
+
+        def valid(**overrides):
+            env = dict(os.environ, STAGE='03', ARTIFACT_ID='123', EXPECTED_SHA256='a' * 64, FINAL_STAGE='false')
+            env.update(overrides)
+            return subprocess.run([sys.executable, '-c', script], env=env, capture_output=True).returncode == 0
+
+        self.assertTrue(valid())
+        self.assertTrue(valid(STAGE='08', FINAL_STAGE='true'))
+        self.assertTrue(valid(STAGE='00', ARTIFACT_ID='', EXPECTED_SHA256=''))
+        for bad in [dict(STAGE='09'), dict(STAGE='1'), dict(ARTIFACT_ID=''), dict(ARTIFACT_ID='0'),
+                    dict(EXPECTED_SHA256='A' * 64), dict(FINAL_STAGE='yes'), dict(STAGE='00'),
+                    dict(STAGE='00', ARTIFACT_ID='', EXPECTED_SHA256='', FINAL_STAGE='true')]:
+            self.assertFalse(valid(**bad), bad)
 
 
 if __name__ == '__main__':

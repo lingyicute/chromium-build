@@ -7,8 +7,8 @@
 ```text
 .github/
   workflows/
-    chromium-stable.yml       # 手动触发、准备、最多 8 段、最终检查
-    chromium-stage.yml        # 本仓库内复用的单段 job，不是 composite Action
+    chromium-stable.yml       # 手动触发、准备段（stage 00）、最多 8 个续编段、最终检查
+    chromium-stage.yml        # 准备段与续编段共用的单段 job，不是 composite Action
   scripts/
     common.sh                # 固定绝对路径、工具缓存位置与网络重试
     host.sh                  # 临时 VM 清理、/ 上建 swap、资源检查，不安装系统包
@@ -39,14 +39,15 @@ README.md
 ## 执行结构
 
 ```text
-prepare
+prepare（stage 00，与续编段共用 chromium-stage.yml）
   ├─ 清理 / 上的预装软件、在 / 建立 16 GiB swap（/mnt 整盘留给源码树与检查点）、检查空闲空间
   ├─ ChromiumDash 查询 Android Stable
   ├─ 官方 Git tag 的提交必须与查询返回的 Chromium SHA 相符
   ├─ checkout 固定的 depot_tools；禁用自更新
   ├─ gclient sync --nohooks → 官方 hooks → gn gen
   ├─ 保存来源与配置记录
-  └─ 完整构建树 → tar/zstd 分块 → 本次运行 artifact
+  ├─ 用本 job 剩余时间直接开始本地 Ninja 编译（省去一次导出、下载与恢复）
+  └─ 未完成：完整构建树 → tar/zstd 分块 → 本次运行 artifact；完成：验签并上传 APK
        ↓
 part-01 → part-02 → … → part-08
   ├─ 按前序 job 给出的精确 artifact ID 下载
@@ -61,12 +62,12 @@ part-01 → part-02 → … → part-08
 result：只有确实完成且必要 job 未失败才算成功
 ```
 
-每个 job 上限 350 分钟。基于单调时钟（`CLOCK_BOOTTIME`）计时，常规编译段受到“本 job 开始后第 265 分钟停止”的预算约束，为导出和上传留出约 85 分钟；最终段 `part-08` 无后续消费者，跳过检查点打包上传并将预算放宽至 330 分钟（单段编译最多 270 分钟），仅保留时间用于 APK 验签与产物上传。
+每个 job 上限 350 分钟。基于单调时钟（`CLOCK_BOOTTIME`）计时，常规编译段（含 `prepare`，源码同步越慢其编译时间越少）受到“本 job 开始后第 265 分钟停止”的预算约束，为导出和上传留出约 85 分钟；最终段 `part-08` 无后续消费者，跳过检查点打包上传并将预算放宽至 330 分钟（单段编译最多 270 分钟），仅保留时间用于 APK 验签与产物上传。
 
 > [!tip]
 > 这只是时间预算，慢网络下可能无法在 GitHub 的时限内保存检查点。
 
-检查点含源码、`.git`、GN/Ninja 中间产物、depot_tools、vpython 缓存和隐藏文件（临时 `CIPD_CACHE_DIR` 下载缓存在 `prepare` 后直接清理，不进入检查点；`.gclient` 使用 `checkout_configuration="small"` 并关闭 JS 覆盖率模块以缩减体积，`config/args.gn` 锁定 `concurrent_links = 1` 防止并发链接 OOM）。归档使用 POSIX tar 保留纳秒 mtime、符号链接与权限（打包前仅为只读目录补齐 `u+w` 以便删除），经多核 `zstd` 压缩后边按 1 GiB 分块写入边计算整流 SHA-256；导出时删除已归档的源文件，恢复时在摘要全部验证后逐块消耗/删除本地压缩分块，降低磁盘峰值。
+检查点含源码、`.git`、GN/Ninja 中间产物、depot_tools、vpython 缓存和隐藏文件（临时 `CIPD_CACHE_DIR` 下载缓存在 `fetch.sh` 结束时直接清理，不进入检查点；`.gclient` 使用 `checkout_configuration="small"` 并关闭 JS 覆盖率模块以缩减体积，`config/args.gn` 锁定 `concurrent_links = 1` 防止并发链接 OOM）。归档使用 POSIX tar 保留纳秒 mtime、符号链接与权限（打包前仅为只读目录补齐 `u+w` 以便删除），经多核 `zstd` 压缩后边按 1 GiB 分块写入边计算整流 SHA-256；导出时删除已归档的源文件，恢复时在摘要全部验证后逐块消耗/删除本地压缩分块，降低磁盘峰值。
 
 Android stable 的版本不是写死的；每次新 workflow run 从官方 API 解析一次，再锁定源码提交。运行期间版本不会漂移。官方 tag 与 API 暂时不一致会失败，不会猜测另一个版本。
 
@@ -118,7 +119,7 @@ Android stable 的版本不是写死的；每次新 workflow run 从官方 API �
 - `gclient` / hooks 失败：源码 fetch、`gclient sync` 与 hooks 会针对同一官方来源和版本各自最多尝试 3 次（不切换镜像或版本）；仍失败时查看 prepare 日志，网络问题可以重跑。
 - `GN --fail-on-unused-args` 失败：新版上游可能调整参数，需要人工审查 `config/args.gn`。不静默忽略未知参数。
 - artifact 摘要不符：停止；不要关闭验证。重新获取或重新构建，并核查生产者。
-- 编译 job 失败：在检查点仍存在的前提下，可尝试 GitHub 的 **Re-run failed jobs**。它仍属于原 run，artifact ID/输出必须可用；新 attempt 使用独立命名。若 GitHub 未保留所需 job 输出或 artifact 已过期，启动新 run。
+- 编译 job 失败：在检查点仍存在的前提下，可尝试 GitHub 的 **Re-run failed jobs**。它仍属于原 run，artifact ID/输出必须可用；新 attempt 使用独立命名。若 GitHub 未保留所需 job 输出或 artifact 已过期，启动新 run。`prepare` 没有前序检查点，它在编译中失败时重跑会从源码同步重新开始。
 
 ## 参考
 

@@ -126,7 +126,7 @@ def main():
     final_stage = os.environ.get('FINAL_STAGE', 'false') == 'true'
     remaining = compute_budget(started, monotonic_now(), final_stage=final_stage)
     if remaining < MIN_BUDGET_SECONDS:
-        raise SystemExit('Restore exhausted the time budget; refusing a no-progress checkpoint')
+        raise SystemExit('Fetch/restore exhausted the time budget; refusing a no-progress checkpoint')
     jobs = compute_jobs()
     os.chdir(root / 'src')
     env = dict(os.environ)

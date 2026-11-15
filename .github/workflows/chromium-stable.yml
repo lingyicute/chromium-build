@@ -12,61 +12,17 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  # Stage 00: fetch and configure a fresh tree, then compile with the time left
+  # instead of paying for an extra checkpoint export/download/restore cycle.
   prepare:
     if: github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
-    runs-on: ubuntu-24.04
-    timeout-minutes: 350
-    outputs:
-      artifact-id: ${{ steps.upload.outputs.artifact-id }}
-      sha256: ${{ steps.pack.outputs.sha256 }}
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          ref: ${{ github.sha }}
-          persist-credentials: false
-          fetch-depth: 1
-      - name: Prepare disposable hosted runner (no apt)
-        run: bash .github/scripts/host.sh
-      - name: Resolve stable, fetch locked source, run upstream hooks, configure
-        timeout-minutes: 245
-        shell: bash
-        run: |
-          set -Eeuo pipefail
-          timeout --signal=INT --kill-after=120s 240m bash .github/scripts/fetch.sh 2>&1 \
-            | tee "$RUNNER_TEMP/chromium-logs/prepare.log"
-      - name: Save source resolution and GN configuration
-        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
-        with:
-          name: source-lock-${{ github.run_id }}-${{ github.run_attempt }}
-          path: /mnt/chromium-relay/metadata/
-          if-no-files-found: error
-          retention-days: 14
-      - name: Destructively export complete tree as checkpoint
-        id: pack
-        timeout-minutes: 50
-        run: bash .github/scripts/pack.sh
-      - name: Upload immutable checkpoint
-        id: upload
-        timeout-minutes: 40
-        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
-        with:
-          name: tree-${{ github.run_id }}-${{ github.run_attempt }}-00
-          path: /mnt/chromium-transfer/checkpoint/tree.part-*
-          compression-level: 0
-          if-no-files-found: error
-          retention-days: 3
-          overwrite: false
-      - name: Save preparation logs
-        if: always()
-        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
-        with:
-          name: logs-${{ github.run_id }}-${{ github.run_attempt }}-00
-          path: ${{ runner.temp }}/chromium-logs/
-          retention-days: 7
-          if-no-files-found: ignore
+    uses: ./.github/workflows/chromium-stage.yml
+    with:
+      stage: '00'
 
   part-01:
     needs: prepare
+    if: ${{ needs.prepare.outputs.status == 'running' }}
     uses: ./.github/workflows/chromium-stage.yml
     with:
       stage: '01'
@@ -165,7 +121,7 @@ jobs:
           elif errors:
               reason = 'FAILED: required stage(s) failed or were cancelled: ' + ', '.join(errors) + '.'
           elif exhausted or needs.get('part-08', {}).get('result') == 'success':
-              reason = 'FAILED: all 8 build stages ran without finishing; stage budget was exhausted.'
+              reason = 'FAILED: prepare and all 8 build stages ran without finishing; stage budget was exhausted.'
           else:
               reason = 'FAILED: no stage produced a completed APK. Inspect stage logs.'
 
