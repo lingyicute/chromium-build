@@ -120,13 +120,14 @@ def fetch_release_json(url=URL, timeout=90, attempts=FETCH_ATTEMPTS,
             return raw
         except urllib.error.HTTPError as exc:
             retryable = exc.code in RETRYABLE_HTTP_CODES or exc.code >= 500
-            if not retryable or attempt == attempts:
-                raise
-            delay = _retry_delay(attempt, retry_delay, getattr(exc, 'headers', None))
+            headers = getattr(exc, 'headers', None)
             try:
                 exc.close()
             except Exception:
                 pass
+            if not retryable or attempt == attempts:
+                raise
+            delay = _retry_delay(attempt, retry_delay, headers)
             last_error = exc
         except (urllib.error.URLError, http.client.HTTPException, TimeoutError, OSError) as exc:
             if attempt == attempts:
