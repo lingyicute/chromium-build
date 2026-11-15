@@ -38,7 +38,7 @@ jobs:
     timeout-minutes: 350
     outputs:
       status: ${{ steps.build.outputs.status }}
-      artifact-id: ${{ steps.upload.outputs.artifact-id }}
+      artifact-id: ${{ steps.upload-retry.outputs.artifact-id || steps.upload.outputs.artifact-id }}
       sha256: ${{ steps.pack.outputs.sha256 }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -129,9 +129,27 @@ jobs:
         if: steps.build.outputs.status == 'running' && !inputs.final
         id: upload
         timeout-minutes: 35
+        # pack.sh has already deleted the tree: without a second try, one failed
+        # upload would throw away everything this stage compiled.
+        continue-on-error: true
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: tree-${{ github.run_id }}-${{ github.run_attempt }}-${{ inputs.stage }}
+          path: |
+            /mnt/chromium-transfer/checkpoint/tree.manifest
+            /mnt/chromium-transfer/checkpoint/tree.part-*
+          compression-level: 0
+          if-no-files-found: error
+          retention-days: 3
+          overwrite: false
+      - name: Retry the checkpoint upload once (best effort within the job limit)
+        if: steps.build.outputs.status == 'running' && !inputs.final && steps.upload.outcome != 'success'
+        id: upload-retry
+        timeout-minutes: 35
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          # New name: the failed attempt may have left a partial artifact behind.
+          name: tree-${{ github.run_id }}-${{ github.run_attempt }}-${{ inputs.stage }}-retry
           path: |
             /mnt/chromium-transfer/checkpoint/tree.manifest
             /mnt/chromium-transfer/checkpoint/tree.part-*
