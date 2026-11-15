@@ -426,6 +426,30 @@ class StaticPolicy(unittest.TestCase):
         self.assertEqual(paths, [f'/mnt/chromium-transfer/checkpoint/{name}'
                                  for name in (checkpoint.MANIFEST, 'tree.part-*')])
 
+    def test_tolerated_artifact_transfers_have_exactly_one_retry(self):
+        stage = (ROOT / '.github/workflows/chromium-stage.yml').read_text()
+        steps = re.split(r'\n      - ', stage.split('\n    steps:\n', 1)[1])
+
+        def inputs(step):
+            lines = [line.strip() for line in step.split('        with:\n', 1)[1].splitlines()]
+            return [line for line in lines if line and not line.startswith('#')]
+
+        tolerated = [step for step in steps if 'continue-on-error: true' in step]
+        self.assertEqual(len(tolerated), 3)
+        for step in tolerated:
+            step_id = re.search(r'^        id: (\S+)$', step, re.M)[1]
+            action = re.search(r'uses: (\S+)', step)[1]
+            retries = [other for other in steps
+                       if f"steps.{step_id}.outcome != 'success'" in other and f'uses: {action}' in other]
+            self.assertEqual(len(retries), 1, step_id)
+            # A retry that fails must fail the job, and must repeat the same transfer; only
+            # a re-upload is renamed so it cannot collide with a partial artifact.
+            self.assertNotIn('continue-on-error', retries[0])
+            self.assertEqual(inputs(retries[0]),
+                             [line + '-retry' if line.startswith('name: ') else line for line in inputs(step)])
+        self.assertIn('artifact-id: ${{ steps.upload-retry.outputs.artifact-id || steps.upload.outputs.artifact-id }}',
+                      stage)
+
     def test_final_stage_and_budget_invariants(self):
         stable = (ROOT / '.github/workflows/chromium-stable.yml').read_text()
         stage = (ROOT / '.github/workflows/chromium-stage.yml').read_text()
