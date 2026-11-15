@@ -89,7 +89,10 @@ def supervise(command, seconds, grace=180, env=None):
             rc = p.poll()
             if rc is not None:
                 return 'completed' if rc == 0 else f'failed:{rc}'
-            os.killpg(p.pid, signal.SIGINT)
+            try:
+                os.killpg(p.pid, signal.SIGINT)
+            except ProcessLookupError:
+                pass
             try:
                 rc = p.wait(timeout=grace)
             except subprocess.TimeoutExpired:
