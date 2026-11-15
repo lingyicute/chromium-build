@@ -21,6 +21,13 @@ done
 # Unlinking is metadata-bound: delete the trees concurrently, and prepare /mnt
 # meanwhile; only the swap file below needs the space they free on /.
 cleanup=()
+reap_cleanup() {
+  local pid
+  for pid in "${cleanup[@]}"; do
+    wait "$pid" || true
+  done
+}
+trap reap_cleanup EXIT
 for dir in /usr/local/lib/android /usr/local/.ghcup /usr/share/dotnet \
   /usr/share/swift /usr/local/share/powershell /usr/lib/google-cloud-sdk \
   /opt/ghc /opt/az; do
@@ -32,14 +39,15 @@ sudo chown "$(id -u):$(id -g)" /mnt/chromium-relay /mnt/chromium-transfer
 # The image ships its own swap file on /mnt; reclaim that space for the tree.
 while IFS= read -r dev; do
   [[ "$dev" == /mnt/* ]] || continue
-  sudo swapoff "$dev" && sudo rm -f "$dev"
+  sudo swapoff -- "$dev" && sudo rm -f -- "$dev"
 done < <(swapon --show=NAME --noheadings --raw)
 # Reap every background deletion before failing so none keep running on error.
 cleanup_failed=0
 for pid in "${cleanup[@]}"; do
   wait "$pid" || cleanup_failed=1
 done
-(( cleanup_failed == 0 ))
+cleanup=()
+(( cleanup_failed == 0 )) || { echo 'Failed to remove preinstalled runner directories' >&2; exit 1; }
 # Swap is only a fallback for linker/R8 peaks, not a replacement for physical
 # RAM. 16 GiB target; shrink only if / is unexpectedly small, never below 8 GiB.
 swap_gib=16
