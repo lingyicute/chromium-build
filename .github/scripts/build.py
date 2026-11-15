@@ -51,7 +51,7 @@ def _live_session_pids(sid):
             stat = Path('/proc', entry, 'stat').read_text()
             # Fields after the ")" closing comm: state ppid pgrp session ...
             fields = stat[stat.rindex(')') + 2:].split()
-            if fields[0] != 'Z' and int(fields[3]) == sid:
+            if fields[0] not in ('Z', 'X', 'x') and int(fields[3]) == sid:
                 pids.append(int(entry))
         except (OSError, ValueError, IndexError):
             pass
@@ -118,7 +118,10 @@ def supervise(command, seconds, grace=180, env=None):
             except (ProcessLookupError, PermissionError):
                 pass
         lingering = kill_session(p.pid)
-        p.wait()
+        if p.pid in lingering:
+            p.poll()
+        else:
+            p.wait()
     if lingering and not result.startswith('failed:'):
         return f'failed:lingering-processes({",".join(map(str, lingering))})'
     return result
