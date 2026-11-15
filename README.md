@@ -118,7 +118,7 @@ Android stable 的版本不是写死的；每次新 workflow run 从官方 API �
 
 `metadata/build-lock.json` 包含 Chromium 版本与提交、depot_tools 提交、workflow 源码提交与 run ID。`metadata/runners.jsonl` 记录各编译阶段的 runner 镜像版本、并行度、swap 写入量与剩余磁盘空间。
 
-本构建保留非官方 Chromium 的 `android_channel="default"`；这里 stable 指**源码版本**，并非表示本仓库产物是 Chrome 官方稳定版。非官方构建默认开启 `dcheck_always_on` 与 `enable_java_asserts`，`config/args.gn` 显式将其关闭，避免 APK 带着会直接崩溃的 C++/Java 断言运行。Android 最低版本由所选 stable 源码决定，不硬编码向下兼容承诺。
+本构建保留非官方 Chromium 的 `android_channel="default"`；这里 stable 指**源码版本**，并非表示本仓库产物是 Chrome 官方稳定版。非官方构建默认开启 `dcheck_always_on`、`enable_java_asserts` 与 `debuggable_apks`，`config/args.gn` 显式将其全部关闭，避免 APK 带着会直接崩溃的 C++/Java 断言或 `android:debuggable="true"` 运行（`release.sh` 亦会拒绝 debuggable APK）。Android 最低版本由所选 stable 源码决定，不硬编码向下兼容承诺。
 
 **默认 APK 使用公开开发密钥签名。** 
 
