@@ -59,7 +59,7 @@ def _live_session_pids(sid):
 
 
 def kill_session(sid, timeout=10.0):
-    """SIGKILL every live process in ninja's session until none remain.
+    """SIGKILL every live process in ninja's session; return any that remain.
     Ninja setpgid()s each child into its own process group, so killpg(ninja)
     alone cannot reach compiler/linker descendants, and a single /proc pass
     can race with forks or still-exiting processes before pack.sh starts."""
@@ -67,52 +67,61 @@ def kill_session(sid, timeout=10.0):
     while True:
         pids = _live_session_pids(sid)
         if not pids:
-            return
+            return []
         for pid in pids:
             try:
                 os.kill(pid, signal.SIGKILL)
             except OSError:
                 pass
         if time.monotonic() >= deadline:
-            return
+            return _live_session_pids(sid)
         time.sleep(0.05)
 
 
 def supervise(command, seconds, grace=180, env=None):
     # start_new_session: ninja becomes session leader, so session id == p.pid.
     p = subprocess.Popen(command, start_new_session=True, env=env)
+    lingering = []
     try:
         try:
             rc = p.wait(timeout=seconds)
+            result = 'completed' if rc == 0 else f'failed:{rc}'
         except subprocess.TimeoutExpired:
             # Races where ninja already failed must not be disguised as timeout.
             rc = p.poll()
             if rc is not None:
-                return 'completed' if rc == 0 else f'failed:{rc}'
-            try:
-                os.killpg(p.pid, signal.SIGINT)
-            except ProcessLookupError:
-                rc = p.wait()
-                return 'completed' if rc == 0 else f'failed:{rc}'
-            try:
-                rc = p.wait(timeout=grace)
-            except subprocess.TimeoutExpired:
-                return 'failed:shutdown-timeout'
-            if rc == 0:
-                return 'completed'
-            # -SIGINT: killed before ninja installed its handler; nothing ran.
-            if rc in NINJA_INTERRUPTED or rc == -signal.SIGINT:
-                return 'running'
-            return f'failed:{rc}'
-        return 'completed' if rc == 0 else f'failed:{rc}'
+                result = 'completed' if rc == 0 else f'failed:{rc}'
+            else:
+                try:
+                    os.killpg(p.pid, signal.SIGINT)
+                except ProcessLookupError:
+                    rc = p.wait()
+                    result = 'completed' if rc == 0 else f'failed:{rc}'
+                else:
+                    try:
+                        rc = p.wait(timeout=grace)
+                    except subprocess.TimeoutExpired:
+                        result = 'failed:shutdown-timeout'
+                    else:
+                        if rc == 0:
+                            result = 'completed'
+                        # -SIGINT: killed before ninja installed its handler; nothing ran.
+                        elif rc in NINJA_INTERRUPTED or rc == -signal.SIGINT:
+                            result = 'running'
+                        else:
+                            result = f'failed:{rc}'
     finally:
         # Also stop descendants before checkpointing (even if ninja exited).
-        try:
-            os.killpg(p.pid, signal.SIGKILL)
-        except (ProcessLookupError, PermissionError):
-            pass
-        kill_session(p.pid)
+        if p.poll() is None:
+            try:
+                os.killpg(p.pid, signal.SIGKILL)
+            except (ProcessLookupError, PermissionError):
+                pass
+        lingering = kill_session(p.pid)
         p.wait()
+    if lingering and not result.startswith('failed:'):
+        return f'failed:lingering-processes({",".join(map(str, lingering))})'
+    return result
 
 
 def summarize(line):
