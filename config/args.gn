@@ -8,6 +8,9 @@ is_chrome_branded = false
 # Non-official builds default this to true, which would ship fatal DCHECKs
 # (slower, larger, and crashing on benign invariant failures) in the APK.
 dcheck_always_on = false
+# config.gni also enables Java asserts whenever !is_official_build, even with
+# dcheck_always_on = false, passing --force-enable-assertions to D8/R8.
+enable_java_asserts = false
 android_channel = "default"
 
 # Keep the build local and checkpoint-compatible.
