@@ -11,11 +11,18 @@ lock=json.loads((root/'metadata/build-lock.json').read_text())
 for field, env in [('repository','GITHUB_REPOSITORY'),('run_id','GITHUB_RUN_ID'),('workflow_sha','GITHUB_SHA')]:
     if lock[field] != os.environ[env]:
         raise SystemExit(f'Checkpoint {field} is from another run/repository/commit')
-for directory, field in [('src','chromium_revision'),('depot_tools','depot_tools_revision')]:
-    sha=subprocess.check_output(['git','-C',str(root/directory),'rev-parse','HEAD'], text=True).strip()
-    if sha != lock[field]: raise SystemExit(f'{directory} revision mismatch')
-if (root/'src/out/Release/args.gn').read_bytes() != (Path(os.environ['GITHUB_WORKSPACE'])/'config/args.gn').read_bytes():
+workspace = Path(os.environ['GITHUB_WORKSPACE'])
+expected_depot = (workspace / 'config/depot_tools_revision.txt').read_text().strip()
+if lock['depot_tools_revision'] != expected_depot:
+    raise SystemExit('depot_tools pin changed')
+for directory, field in [('src', 'chromium_revision'), ('depot_tools', 'depot_tools_revision')]:
+    sha = subprocess.check_output(['git', '-C', str(root / directory), 'rev-parse', 'HEAD'], text=True).strip()
+    if sha != lock[field]:
+        raise SystemExit(f'{directory} revision mismatch')
+if (root / 'src/out/Release/args.gn').read_bytes() != (workspace / 'config/args.gn').read_bytes():
     raise SystemExit('GN arguments changed')
+if not (root / 'src/out/Release/build.ninja').is_file():
+    raise SystemExit('Restored build tree is missing out/Release/build.ninja')
 PY
 # No gclient sync, runhooks, or gn gen here: keep all build inputs and mtimes.
 rmdir "$CR_TRANSFER/checkpoint"
