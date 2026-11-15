@@ -14,7 +14,7 @@
     host.sh                  # 临时 VM 清理、/ 上建 swap、资源检查，不安装系统包
     resolve.py               # 解析一次 Android Stable，验证 JSON
     fetch.sh                 # 源码与工具链锁定、同步、hooks、GN
-    checkpoint.py            # 严格摘要检查与分块流恢复
+    checkpoint.py            # 分块清单摘要、逐块先验证后流式恢复
     pack.sh                  # 破坏性导出检查点（仅用于临时 VM）
     restore.sh               # 恢复并检查仓库/运行/提交身份
     build.py                 # 时间片与进程组监督
@@ -51,7 +51,7 @@ prepare（stage 00，与续编段共用 chromium-stage.yml）
        ↓
 part-01 → part-02 → … → part-08
   ├─ 按前序 job 给出的精确 artifact ID 下载
-  ├─ 验证整个压缩流 SHA-256 后再解包
+  ├─ 用前序 job 给出的 SHA-256 认证分块清单，逐块验证后才解包
   ├─ 恢复固定路径与纳秒文件时间戳
   ├─ 不重新 sync / runhooks / gn gen
   ├─ 本地 Ninja 编译至本 job 开始后第 265 分钟（最终段 part-08 为第 330 分钟）
@@ -67,7 +67,7 @@ result：只有确实完成且必要 job 未失败才算成功
 > [!tip]
 > 这只是时间预算，慢网络下可能无法在 GitHub 的时限内保存检查点。
 
-检查点含源码、`.git`、GN/Ninja 中间产物、depot_tools、vpython 缓存和隐藏文件（临时 `CIPD_CACHE_DIR` 下载缓存在 `fetch.sh` 结束时直接清理，不进入检查点；`.gclient` 使用 `checkout_configuration="small"` 并关闭 JS 覆盖率模块以缩减体积，`config/args.gn` 锁定 `concurrent_links = 1` 防止并发链接 OOM）。归档使用 POSIX tar 保留纳秒 mtime、符号链接与权限（打包前仅为只读目录补齐 `u+w` 以便删除），经多核 `zstd` 压缩后边按 1 GiB 分块写入边计算整流 SHA-256；导出时删除已归档的源文件，恢复时在摘要全部验证后逐块消耗/删除本地压缩分块，降低磁盘峰值。
+检查点含源码、`.git`、GN/Ninja 中间产物、depot_tools、vpython 缓存和隐藏文件（临时 `CIPD_CACHE_DIR` 下载缓存在 `fetch.sh` 结束时直接清理，不进入检查点；`.gclient` 使用 `checkout_configuration="small"` 并关闭 JS 覆盖率模块以缩减体积，`config/args.gn` 锁定 `concurrent_links = 1` 防止并发链接 OOM）。归档使用 POSIX tar 保留纳秒 mtime、符号链接与权限（打包前仅为只读目录补齐 `u+w` 以便删除），经多核 `zstd` 压缩后边按 1 GiB 分块写入边计算每块 SHA-256，并生成记录各块摘要与大小的 `tree.manifest`；传给下一段的是该清单的 SHA-256。导出时删除已归档的源文件；恢复时先认证清单，再逐块“验证 → 解包 → 删除”：未经验证的字节不会进入 zstd/tar，每块只需读盘一次（下一块在后台线程提前校验），不必先整体读一遍算摘要、再整体读一遍解包。
 
 Android stable 的版本不是写死的；每次新 workflow run 从官方 API 解析一次，再锁定源码提交。运行期间版本不会漂移。官方 tag 与 API 暂时不一致会失败，不会猜测另一个版本。
 
