@@ -92,7 +92,8 @@ def supervise(command, seconds, grace=180, env=None):
             try:
                 os.killpg(p.pid, signal.SIGINT)
             except ProcessLookupError:
-                pass
+                rc = p.wait()
+                return 'completed' if rc == 0 else f'failed:{rc}'
             try:
                 rc = p.wait(timeout=grace)
             except subprocess.TimeoutExpired:
