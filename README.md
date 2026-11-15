@@ -33,7 +33,7 @@ README.md
 
 ## 运行
 
-打开 **Actions → Chromium Stable Android arm64 → Run workflow**，
+打开 **Actions → Chromium Stable Android arm64 → Run workflow**。
 
 无需添加任何 repository secret。不需要 PAT、Google API key 或 keystore。
 
