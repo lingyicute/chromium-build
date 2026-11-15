@@ -34,8 +34,12 @@ while IFS= read -r dev; do
   [[ "$dev" == /mnt/* ]] || continue
   sudo swapoff "$dev" && sudo rm -f "$dev"
 done < <(swapon --show=NAME --noheadings --raw)
-# `wait PID` returns that deletion's own status, so set -e still stops on failure.
-for pid in "${cleanup[@]}"; do wait "$pid"; done
+# Reap every background deletion before failing so none keep running on error.
+cleanup_failed=0
+for pid in "${cleanup[@]}"; do
+  wait "$pid" || cleanup_failed=1
+done
+(( cleanup_failed == 0 ))
 # Swap is only a fallback for linker/R8 peaks, not a replacement for physical
 # RAM. 16 GiB target; shrink only if / is unexpectedly small, never below 8 GiB.
 swap_gib=16
