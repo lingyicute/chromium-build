@@ -212,6 +212,49 @@ class Checkpoint(unittest.TestCase):
         self.assertEqual(p.stdout, b'')
         self.assertEqual(len(self.names()), 3)
 
+    def test_missing_manifest(self):
+        (self.root / 'tree.manifest').unlink()
+        with self.assertRaises(ValueError):
+            checkpoint.parts(self.root)
+
+    def test_tampered_part_is_never_streamed(self):
+        # Same size, different bytes: only the per-part SHA-256 can catch this.
+        (self.root / 'tree.part-00001').write_bytes(b'ECOND')
+        p = self.consume(self.expected)
+        self.assertNotEqual(p.returncode, 0)
+        self.assertEqual(p.stdout, b'firsts')
+        self.assertEqual(self.names(), ['tree.manifest', 'tree.part-00001'])
+
+    def test_truncated_part_rejected_before_streaming(self):
+        (self.root / 'tree.part-00001').write_bytes(b'econ')
+        p = self.consume(self.expected)
+        self.assertNotEqual(p.returncode, 0)
+        self.assertEqual(p.stdout, b'')
+        self.assertEqual(len(self.names()), 3)
+
+    def test_swapped_parts_rejected(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            dest = Path(tmp)
+            sha, _, _ = checkpoint.pack_stream(dest, io.BytesIO(b'aaaabbbb'), chunk_size=4)
+            (dest / 'tree.part-00000').write_bytes(b'bbbb')
+            (dest / 'tree.part-00001').write_bytes(b'aaaa')
+            out = io.BytesIO()
+            with self.assertRaises(ValueError):
+                checkpoint.restore_stream(dest, sha, out)
+            self.assertEqual(out.getvalue(), b'')
+
+    def test_forged_manifest_rejected(self):
+        # Re-describing a tampered part changes the manifest digest the next job expects.
+        forged = [self.PARTS[0], b'ECOND']
+        (self.root / 'tree.part-00001').write_bytes(forged[1])
+        (self.root / 'tree.manifest').write_text(''.join(
+            f'{hashlib.sha256(data).hexdigest()} {len(data)} tree.part-{n:05d}\n' for n, data in enumerate(forged)))
+        self.assertNotEqual(checkpoint.digest(self.root), self.expected)
+        p = self.consume(self.expected)
+        self.assertNotEqual(p.returncode, 0)
+        self.assertEqual(p.stdout, b'')
+        self.assertEqual(len(self.names()), 3)
+
     def test_tar_metadata_round_trip(self):
         # Tests real GNU tar without compression, including nested read-only dirs.
         with tempfile.TemporaryDirectory() as tmp:
@@ -365,6 +408,12 @@ class StaticPolicy(unittest.TestCase):
             for bad in ['pull_request_target:', 'pull_request:', 'secrets.', 'secrets: inherit',
                         'contents: write', 'actions: write', 'id-token: write']:
                 self.assertNotIn(bad, p.read_text())
+
+    def test_checkpoint_upload_includes_manifest(self):
+        stage = (ROOT / '.github/workflows/chromium-stage.yml').read_text()
+        paths = re.search(r'id: upload\n[\s\S]*?path: \|\n((?:\s+/\S+\n)+)', stage)[1].split()
+        self.assertEqual(paths, [f'/mnt/chromium-transfer/checkpoint/{name}'
+                                 for name in (checkpoint.MANIFEST, 'tree.part-*')])
 
     def test_final_stage_and_budget_invariants(self):
         stable = (ROOT / '.github/workflows/chromium-stable.yml').read_text()
