@@ -7,6 +7,7 @@ import json
 import os
 from pathlib import Path
 import re
+import sys
 import time
 import urllib.error
 import urllib.request
@@ -83,8 +84,10 @@ def _retry_delay(attempt, retry_delay, headers=None, now=None):
 
 def fetch_release_json(url=URL, timeout=90, attempts=FETCH_ATTEMPTS,
                        retry_delay=RETRY_BASE_SECONDS, opener=None):
-    if attempts < 1:
-        raise ValueError('attempts must be positive')
+    if isinstance(attempts, bool) or not isinstance(attempts, int) or attempts < 1:
+        raise ValueError('attempts must be a positive integer')
+    if isinstance(timeout, bool) or timeout <= 0:
+        raise ValueError('timeout must be positive')
     if opener is None:
         opener = urllib.request.build_opener(_NoRedirectHandler())
     req = urllib.request.Request(
@@ -95,9 +98,14 @@ def fetch_release_json(url=URL, timeout=90, attempts=FETCH_ATTEMPTS,
     for attempt in range(1, attempts + 1):
         try:
             with opener.open(req, timeout=timeout) as response:
+                status = getattr(response, 'status', 200)
+                if status != 200:
+                    raise ValueError(f'Unexpected ChromiumDash HTTP status: {status}')
                 if response.url != url:
                     raise ValueError('Unexpected ChromiumDash redirect')
                 raw = response.read(MAX_BYTES + 1)
+            if not raw:
+                raise ValueError('Empty ChromiumDash response')
             if len(raw) > MAX_BYTES:
                 raise ValueError('Oversized response')
             return raw
@@ -116,6 +124,7 @@ def fetch_release_json(url=URL, timeout=90, attempts=FETCH_ATTEMPTS,
                 raise
             delay = _retry_delay(attempt, retry_delay)
             last_error = exc
+        print(f'ChromiumDash fetch attempt {attempt}/{attempts} failed ({last_error}); retrying in {delay:.1f}s', file=sys.stderr)
         if delay > 0:
             time.sleep(delay)
     raise last_error
