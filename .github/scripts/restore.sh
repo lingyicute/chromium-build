@@ -10,11 +10,14 @@ import json, os, subprocess
 from pathlib import Path
 root = Path(os.environ['CR_ROOT'])
 lock = json.loads((root / 'metadata/build-lock.json').read_text())
+if not isinstance(lock, dict):
+    raise SystemExit('Invalid build-lock.json')
 for field, env in [('repository', 'GITHUB_REPOSITORY'), ('run_id', 'GITHUB_RUN_ID'), ('workflow_sha', 'GITHUB_SHA')]:
     if lock.get(field) != os.environ[env]:
         raise SystemExit(f'Checkpoint {field} is from another run/repository/commit')
-if lock.get('target') != 'chrome_public_apk' or lock.get('architecture') != 'arm64':
-    raise SystemExit('Checkpoint target/architecture mismatch')
+if (lock.get('target') != 'chrome_public_apk' or lock.get('architecture') != 'arm64'
+        or lock.get('source') != 'https://chromium.googlesource.com/chromium/src.git'):
+    raise SystemExit('Checkpoint source/target/architecture mismatch')
 workspace = Path(os.environ['GITHUB_WORKSPACE'])
 expected_depot = (workspace / 'config/depot_tools_revision.txt').read_text().strip()
 if lock.get('depot_tools_revision') != expected_depot:
@@ -23,8 +26,12 @@ for directory, field in [('src', 'chromium_revision'), ('depot_tools', 'depot_to
     sha = subprocess.check_output(['git', '-C', str(root / directory), 'rev-parse', 'HEAD'], text=True).strip()
     if sha != lock.get(field):
         raise SystemExit(f'{directory} revision mismatch')
-parts = dict(line.split('=', 1) for line in (root / 'src/chrome/VERSION').read_text().splitlines() if '=' in line)
-actual_version = '.'.join(parts[k].strip() for k in ('MAJOR', 'MINOR', 'BUILD', 'PATCH'))
+parts = {k.strip(): v.strip() for line in (root / 'src/chrome/VERSION').read_text().splitlines()
+         if '=' in line for k, v in (line.split('=', 1),)}
+try:
+    actual_version = '.'.join(parts[k] for k in ('MAJOR', 'MINOR', 'BUILD', 'PATCH'))
+except KeyError as exc:
+    raise SystemExit(f'Restored chrome/VERSION missing field: {exc.args[0]}') from exc
 if actual_version != lock.get('version'):
     raise SystemExit(f'Restored chrome/VERSION mismatch: {actual_version} != {lock.get("version")}')
 if (root / 'src/out/Release/args.gn').read_bytes() != (workspace / 'config/args.gn').read_bytes():
