@@ -450,6 +450,18 @@ class StaticPolicy(unittest.TestCase):
         self.assertIn('artifact-id: ${{ steps.upload-retry.outputs.artifact-id || steps.upload.outputs.artifact-id }}',
                       stage)
 
+    def test_unverified_apk_is_kept_only_on_failure_under_its_own_name(self):
+        stage = (ROOT / '.github/workflows/chromium-stage.yml').read_text()
+        step = re.search(r'      - name: Keep the unverified APK[\s\S]*?(?=\n      - name: )', stage)[0]
+        self.assertIn("\n        if: failure() && steps.build.outputs.status == 'completed'\n", step)
+        self.assertIn('\n          name: unverified-apk-', step)
+        self.assertNotIn('continue-on-error', step)
+        # Same file release.sh verifies ($CR_ROOT is fixed in common.sh).
+        self.assertIn('\n          path: /mnt/chromium-relay/src/out/Release/apks/ChromePublic.apk\n', step)
+        self.assertIn('export CR_ROOT=/mnt/chromium-relay\n', (ROOT / '.github/scripts/common.sh').read_text())
+        self.assertIn('apk="$CR_ROOT/src/out/Release/apks/ChromePublic.apk"\n',
+                      (ROOT / '.github/scripts/release.sh').read_text())
+
     def test_final_stage_and_budget_invariants(self):
         stable = (ROOT / '.github/workflows/chromium-stable.yml').read_text()
         stage = (ROOT / '.github/workflows/chromium-stage.yml').read_text()
