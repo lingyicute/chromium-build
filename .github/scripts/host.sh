@@ -1,14 +1,15 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
+export PATH="/usr/bin:/bin:/usr/sbin:/sbin"
 # Run ONLY on a fresh GitHub-hosted VM. Never use this cleanup on a personal host.
-[[ "${RUNNER_ENVIRONMENT:-}" == github-hosted ]] || { echo 'GitHub-hosted runner required'; exit 1; }
-[[ "$(uname -m)" == x86_64 ]] || { echo "Unsupported architecture: $(uname -m) (need x86_64)"; exit 1; }
+[[ "${RUNNER_ENVIRONMENT:-}" == github-hosted ]] || { echo 'GitHub-hosted runner required' >&2; exit 1; }
+[[ "$(uname -m)" == x86_64 ]] || { echo "Unsupported architecture: $(uname -m) (need x86_64)" >&2; exit 1; }
 . /etc/os-release
-[[ "$ID" == ubuntu && "$VERSION_ID" == 24.04 ]] || { echo "Unsupported image: $ID $VERSION_ID (need ubuntu 24.04)"; exit 1; }
+[[ "$ID" == ubuntu && "$VERSION_ID" == 24.04 ]] || { echo "Unsupported image: $ID $VERSION_ID (need ubuntu 24.04)" >&2; exit 1; }
 mkdir -p "${RUNNER_TEMP:?}/chromium-logs"
-[[ -x /usr/bin/python3 ]] || { echo 'Missing /usr/bin/python3; refusing apt/pip fallback'; exit 1; }
-for cmd in git tar zstd sha256sum timeout fallocate mkswap swapon swapoff free df du find sort xargs tee chmod nproc; do
-  command -v "$cmd" >/dev/null || { echo "Missing runner tool: $cmd; refusing apt/pip fallback"; exit 1; }
+[[ -x /usr/bin/python3 ]] || { echo 'Missing /usr/bin/python3; refusing apt/pip fallback' >&2; exit 1; }
+for cmd in sudo git tar zstd sha256sum timeout fallocate mkswap swapon swapoff free df du find sort xargs tee chmod nproc cp rmdir dirname tail sleep; do
+  command -v "$cmd" >/dev/null || { echo "Missing runner tool: $cmd; refusing apt/pip fallback" >&2; exit 1; }
 done
 # Record monotonic boot time so NTP wall-clock adjustments cannot skew stage budgets.
 /usr/bin/python3 -c 'import time; print(int(time.clock_gettime(time.CLOCK_BOOTTIME)))' > "$RUNNER_TEMP/chromium-job-start"
@@ -32,7 +33,7 @@ done < <(swapon --show=NAME --noheadings --raw)
 swap_gib=16
 root_free_gib=$(/usr/bin/python3 -c 'import shutil; print(shutil.disk_usage("/").free // 2**30)')
 (( root_free_gib - swap_gib >= 8 )) || swap_gib=$(( root_free_gib - 8 ))
-(( swap_gib >= 8 )) || { echo "Only ${root_free_gib} GiB free on / after cleanup; cannot place a >= 8 GiB swap file"; exit 1; }
+(( swap_gib >= 8 )) || { echo "Only ${root_free_gib} GiB free on / after cleanup; cannot place a >= 8 GiB swap file" >&2; exit 1; }
 sudo fallocate -l "${swap_gib}G" /chromium-relay.swap
 sudo chmod 600 /chromium-relay.swap
 sudo mkswap /chromium-relay.swap >/dev/null
