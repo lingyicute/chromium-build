@@ -111,6 +111,18 @@ def supervise(command, seconds, grace=180, env=None):
         p.wait()
 
 
+def summarize(line):
+    """Append to the Actions job summary; a diagnostic must never fail the build."""
+    path = os.environ.get('GITHUB_STEP_SUMMARY')
+    if not path:
+        return
+    try:
+        with open(path, 'a') as f:
+            f.write(line + '\n')
+    except OSError:
+        pass
+
+
 def main():
     def _handle_sigterm(signum, frame):
         raise SystemExit(f'Build supervisor terminated by signal {signum}')
@@ -120,7 +132,9 @@ def main():
     root = Path(os.environ['CR_ROOT'])
     started = int((Path(os.environ['RUNNER_TEMP']) / 'chromium-job-start').read_text().strip())
     final_stage = os.environ.get('FINAL_STAGE', 'false') == 'true'
-    remaining = compute_budget(started, monotonic_now(), final_stage=final_stage)
+    now = monotonic_now()
+    remaining = compute_budget(started, now, final_stage=final_stage)
+    setup = round(now - started, 1)
     if remaining < MIN_BUDGET_SECONDS:
         raise SystemExit('Fetch/restore exhausted the time budget; refusing a no-progress checkpoint')
     jobs = compute_jobs()
@@ -140,12 +154,14 @@ def main():
                   image_version=os.environ.get('ImageVersion'), jobs=jobs,
                   run_attempt=os.environ['GITHUB_RUN_ATTEMPT'],
                   final_stage=final_stage, budget_minutes=round(remaining / 60, 1),
-                  elapsed_seconds=elapsed, status=status)
+                  setup_seconds=setup, elapsed_seconds=elapsed, status=status)
     with (root / 'metadata/runners.jsonl').open('a') as f:
         f.write(json.dumps(record) + '\n')
     with open(os.environ['GITHUB_OUTPUT'], 'a') as f:
         f.write(f'status={status}\n')
     print(f'Stage result: {status} ({elapsed:.1f}s)', flush=True)
+    summarize(f"- Stage {os.environ['STAGE']}: `{status}` after compiling for {elapsed / 60:.1f} min with -j{jobs}; "
+              f'setup before compiling (runner prep, then fetch or download and restore) took {setup / 60:.1f} min.')
 
 
 if __name__ == '__main__':

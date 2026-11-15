@@ -391,6 +391,9 @@ class Supervisor(unittest.TestCase):
         record = json.loads(files['root/metadata/runners.jsonl'])
         self.assertEqual((record['stage'], record['status'], record['final_stage']), ('03', 'completed', False))
         self.assertEqual(record['jobs'], build.compute_jobs())
+        self.assertGreaterEqual(record['setup_seconds'], 0)
+        self.assertRegex(files['summary'], r'^- Stage 03: `completed` after compiling for \d+\.\d min with -j\d+; '
+                                           r'setup before compiling .* took \d+\.\d min\.\n$')
 
     def test_failed_build_reports_no_status(self):
         p, files = self.run_main('exit 1')
