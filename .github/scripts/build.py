@@ -169,8 +169,15 @@ def main():
 
     root = Path(os.environ['CR_ROOT'])
     started = int((Path(os.environ['RUNNER_TEMP']) / 'chromium-job-start').read_text().strip())
-    final_stage = os.environ.get('FINAL_STAGE', 'false') == 'true'
+    final_raw = os.environ.get('FINAL_STAGE', 'false')
+    if final_raw not in ('true', 'false'):
+        raise SystemExit(f'Invalid FINAL_STAGE: {final_raw!r}')
+    final_stage = final_raw == 'true'
     now = monotonic_now()
+    if started > now:
+        msg = f'Invalid future job start timestamp ({started} > {now:.1f})'
+        summarize(f"- Stage {os.environ['STAGE']}: `failed` before compiling; {msg}.")
+        raise SystemExit(msg)
     remaining = compute_budget(started, now, final_stage=final_stage)
     setup = round(now - started, 1)
     if remaining < MIN_BUDGET_SECONDS:
