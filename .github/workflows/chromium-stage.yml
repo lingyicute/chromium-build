@@ -86,7 +86,10 @@ jobs:
           retention-days: 14
       - name: Download exact checkpoint ID from this run only
         if: inputs.stage != '00'
+        id: download
         timeout-minutes: 70
+        # A transient artifact-service error should not stall an unattended run.
+        continue-on-error: true
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           artifact-ids: ${{ inputs.artifact-id }}
@@ -94,6 +97,18 @@ jobs:
           merge-multiple: true
           digest-mismatch: error
           # Deliberately omit github-token, repository, run-id and pattern.
+      - name: Discard the partial checkpoint download
+        if: inputs.stage != '00' && steps.download.outcome != 'success'
+        run: rm -rf -- /mnt/chromium-transfer/checkpoint
+      - name: Retry the checkpoint download once
+        if: inputs.stage != '00' && steps.download.outcome != 'success'
+        timeout-minutes: 70
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          artifact-ids: ${{ inputs.artifact-id }}
+          path: /mnt/chromium-transfer/checkpoint
+          merge-multiple: true
+          digest-mismatch: error
       - name: Verify producer hash, consume chunks, restore tree
         if: inputs.stage != '00'
         timeout-minutes: 40
