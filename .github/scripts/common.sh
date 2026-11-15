@@ -18,7 +18,8 @@ export DEPOT_TOOLS_UPDATE=0
 export DEPOT_TOOLS_METRICS=0
 export DEPOT_TOOLS_COLLECT_METRICS=0
 export GIT_TERMINAL_PROMPT=0
-export PYTHONDONTWRITEBYTECODE=1
+# Do NOT set PYTHONDONTWRITEBYTECODE: thousands of Python build actions would
+# recompile their imports on every run; the .pyc caches survive checkpoints.
 export PYTHONUNBUFFERED=1
 export PATH="$CR_ROOT/depot_tools:/usr/bin:/bin:/usr/sbin:/sbin"
 unset GIT_CACHE_PATH CCACHE_DIR CCACHE_PREFIX GOOGLE_APPLICATION_CREDENTIALS \
