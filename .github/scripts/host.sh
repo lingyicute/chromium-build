@@ -6,11 +6,12 @@ set -Eeuo pipefail
 . /etc/os-release
 [[ "$ID" == ubuntu && "$VERSION_ID" == 24.04 ]] || { echo "Unsupported image: $ID $VERSION_ID (need ubuntu 24.04)"; exit 1; }
 mkdir -p "${RUNNER_TEMP:?}/chromium-logs"
-for cmd in git python3 tar zstd sha256sum timeout fallocate mkswap swapon swapoff free df find sort xargs tee; do
+[[ -x /usr/bin/python3 ]] || { echo 'Missing /usr/bin/python3; refusing apt/pip fallback'; exit 1; }
+for cmd in git tar zstd sha256sum timeout fallocate mkswap swapon swapoff free df du find sort xargs tee chmod nproc; do
   command -v "$cmd" >/dev/null || { echo "Missing runner tool: $cmd; refusing apt/pip fallback"; exit 1; }
 done
 # Record monotonic boot time so NTP wall-clock adjustments cannot skew stage budgets.
-python3 -c 'import time; print(int(time.clock_gettime(time.CLOCK_BOOTTIME)))' > "$RUNNER_TEMP/chromium-job-start"
+/usr/bin/python3 -c 'import time; print(int(time.clock_gettime(time.CLOCK_BOOTTIME)))' > "$RUNNER_TEMP/chromium-job-start"
 # Disk layout: / (OS disk) receives the swap file; /mnt (the larger ephemeral
 # disk) is kept entirely for the Chromium tree and checkpoints. Freeing / is
 # what makes room for the swap below.
@@ -25,18 +26,18 @@ sudo chown "$(id -u):$(id -g)" /mnt/chromium-relay /mnt/chromium-transfer
 while IFS= read -r dev; do
   [[ "$dev" == /mnt/* ]] || continue
   sudo swapoff "$dev" && sudo rm -f "$dev"
-done < <(swapon --show=NAME --noheadings)
+done < <(swapon --show=NAME --noheadings --raw)
 # Swap is only a fallback for linker/R8 peaks, not a replacement for physical
 # RAM. 16 GiB target; shrink only if / is unexpectedly small, never below 8 GiB.
 swap_gib=16
-root_free_gib=$(df --output=avail -BG / | tail -1 | tr -dc '0-9')
+root_free_gib=$(/usr/bin/python3 -c 'import shutil; print(shutil.disk_usage("/").free // 2**30)')
 (( root_free_gib - swap_gib >= 8 )) || swap_gib=$(( root_free_gib - 8 ))
 (( swap_gib >= 8 )) || { echo "Only ${root_free_gib} GiB free on / after cleanup; cannot place a >= 8 GiB swap file"; exit 1; }
 sudo fallocate -l "${swap_gib}G" /chromium-relay.swap
 sudo chmod 600 /chromium-relay.swap
 sudo mkswap /chromium-relay.swap >/dev/null
 sudo swapon /chromium-relay.swap
-python3 - <<'PY'
+/usr/bin/python3 - <<'PY'
 import shutil
 free = shutil.disk_usage('/mnt/chromium-relay').free / 2**30
 print(f'Free on /mnt for the tree: {free:.1f} GiB')
@@ -45,4 +46,4 @@ if free < 45:
 if free < 100:
     print('::warning::Below Chromium documented 100 GB free disk requirement; best-effort build only.')
 PY
-{ df -h / /mnt; free -h; swapon --show; printf 'ImageOS=%s\nImageVersion=%s\n' "${ImageOS:-unknown}" "${ImageVersion:-unknown}"; } | tee "$RUNNER_TEMP/chromium-logs/host.txt"
+{ df -hT / /mnt; free -h; swapon --show; printf 'CPUs=%s\nImageOS=%s\nImageVersion=%s\n' "$(nproc)" "${ImageOS:-unknown}" "${ImageVersion:-unknown}"; } | tee "$RUNNER_TEMP/chromium-logs/host.txt"
