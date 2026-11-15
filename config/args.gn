@@ -18,3 +18,6 @@ blink_symbol_level = 0
 v8_symbol_level = 0
 chrome_pgo_phase = 0
 use_thin_lto = false
+# Prevent concurrent lld/R8 links from thrashing swap or OOMing 7-16 GiB runners
+# (default Android symbol_level=0 heuristics otherwise allow 3 links on 16 GiB).
+concurrent_links = 1
