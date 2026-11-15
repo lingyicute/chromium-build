@@ -7,13 +7,18 @@ export CR_TRANSFER=/mnt/chromium-transfer
 export CR_LOGS="${RUNNER_TEMP:?}/chromium-logs"
 export HOME="$CR_ROOT/home"
 export XDG_CACHE_HOME="$CR_ROOT/cache/xdg"
-export CIPD_CACHE_DIR="$CR_ROOT/cache/cipd"
+# Keep CIPD's download instance cache outside $CR_ROOT so already-deployed
+# packages are not archived twice into every stage checkpoint.
+export CIPD_CACHE_DIR="$CR_TRANSFER/cipd-cache"
 export VPYTHON_VIRTUALENV_ROOT="$CR_ROOT/cache/vpython"
 export DEPOT_TOOLS_UPDATE=0
 export DEPOT_TOOLS_METRICS=0
 export GIT_TERMINAL_PROMPT=0
 export PYTHONDONTWRITEBYTECODE=1
+export PYTHONUNBUFFERED=1
 export PATH="$CR_ROOT/depot_tools:/usr/bin:/bin:/usr/sbin:/sbin"
-unset GIT_CACHE_PATH CCACHE_DIR CCACHE_PREFIX GOOGLE_APPLICATION_CREDENTIALS
+unset GIT_CACHE_PATH CCACHE_DIR CCACHE_PREFIX GOOGLE_APPLICATION_CREDENTIALS \
+  ANDROID_HOME ANDROID_SDK_ROOT ANDROID_NDK ANDROID_NDK_HOME \
+  ANDROID_NDK_ROOT ANDROID_NDK_LATEST_HOME JAVA_HOME
 mkdir -p "$CR_LOGS"
 fail() { echo "::error::$*" >&2; exit 1; }
