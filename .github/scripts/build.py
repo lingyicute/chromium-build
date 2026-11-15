@@ -171,7 +171,11 @@ def main():
     remaining = compute_budget(started, now, final_stage=final_stage)
     setup = round(now - started, 1)
     if remaining < MIN_BUDGET_SECONDS:
-        raise SystemExit('Fetch/restore exhausted the time budget; refusing a no-progress checkpoint')
+        msg = (f'Fetch/restore exhausted the time budget '
+               f'(setup {setup / 60:.1f} min, remaining {remaining / 60:.1f} min); '
+               f'refusing a no-progress checkpoint')
+        summarize(f"- Stage {os.environ['STAGE']}: `failed` before compiling; {msg}.")
+        raise SystemExit(msg)
     jobs = compute_jobs()
     os.chdir(root / 'src')
     env = dict(os.environ)
@@ -188,6 +192,9 @@ def main():
     usage = (f"{'unknown' if swap_mib is None else swap_mib} MiB written to swap while compiling, "
              f"{'unknown' if disk_free is None else disk_free} GiB left free on the build disk")
     if status.startswith('failed:'):
+        summarize(f"- Stage {os.environ['STAGE']}: `{status}` after compiling for {elapsed / 60:.1f} min "
+                  f'with -j{jobs}; setup before compiling took {setup / 60:.1f} min.')
+        summarize(f"- Stage {os.environ['STAGE']} resources: {usage}.")
         # Heavy swapping or a full disk explains many failures (e.g. an OOM kill or ENOSPC).
         raise SystemExit(f'Build failed after {elapsed:.1f}s, NOT checkpointing: {status}; {usage}')
     if status == 'running' and final_stage:
