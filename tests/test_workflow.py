@@ -2,6 +2,7 @@
 import hashlib
 import importlib.util
 import io
+import json
 import os
 from pathlib import Path
 import re
@@ -516,6 +517,51 @@ class StaticPolicy(unittest.TestCase):
                     dict(EXPECTED_SHA256='A' * 64), dict(FINAL_STAGE='yes'), dict(STAGE='00'),
                     dict(STAGE='00', ARTIFACT_ID='', EXPECTED_SHA256='', FINAL_STAGE='true')]:
             self.assertFalse(valid(**bad), bad)
+
+
+class ResultVerdict(unittest.TestCase):
+    ORDER = ['prepare'] + [f'part-{i:02d}' for i in range(1, 9)]
+
+    def verdict(self, **jobs):
+        stable = (ROOT / '.github/workflows/chromium-stable.yml').read_text()
+        script = textwrap.dedent(re.search(r"python3 - <<'PY'\n(.*?)\n *PY\n", stable, re.S)[1])
+        needs = {name: dict(result='skipped', outputs={}) for name in self.ORDER}
+        for name, (result, status) in jobs.items():
+            needs[name.replace('_', '-')] = dict(result=result, outputs=dict(status=status) if status else {})
+        with tempfile.TemporaryDirectory() as tmp:
+            summary = Path(tmp) / 'summary.md'
+            p = subprocess.run([sys.executable, '-c', script], capture_output=True, text=True,
+                               env=dict(os.environ, NEEDS_JSON=json.dumps(needs), GITHUB_STEP_SUMMARY=str(summary)))
+            return p.returncode == 0, summary.read_text()
+
+    def test_completed_stage_passes_and_later_stages_may_be_skipped(self):
+        ok, summary = self.verdict(prepare=('success', 'running'), part_01=('success', 'completed'))
+        self.assertTrue(ok, summary)
+        self.assertIn('APK completed in `part-01`', summary)
+        self.assertIn('| `part-02` | `skipped` | `-` |', summary)
+
+    def test_exhausted_chain_fails(self):
+        jobs = {name.replace('-', '_'): ('success', 'running') for name in self.ORDER}
+        jobs['part_08'] = ('success', 'exhausted')
+        ok, summary = self.verdict(**jobs)
+        self.assertFalse(ok)
+        self.assertIn('stage budget was exhausted', summary)
+
+    def test_skipped_prepare_fails(self):
+        ok, summary = self.verdict()
+        self.assertFalse(ok)
+        self.assertIn('default branch', summary)
+
+    def test_failed_or_cancelled_stage_fails(self):
+        for result in ('failure', 'cancelled'):
+            ok, summary = self.verdict(prepare=('success', 'running'), part_01=(result, 'running'))
+            self.assertFalse(ok)
+            self.assertIn('failed or were cancelled: part-01.', summary)
+
+    def test_completed_build_with_failed_release_fails(self):
+        ok, summary = self.verdict(prepare=('success', 'running'), part_01=('failure', 'completed'))
+        self.assertFalse(ok)
+        self.assertNotIn('APK completed in', summary)
 
 
 if __name__ == '__main__':
