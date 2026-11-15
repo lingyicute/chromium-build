@@ -12,6 +12,10 @@ on:
       sha256:
         required: true
         type: string
+      final:
+        required: false
+        type: boolean
+        default: false
     outputs:
       status:
         value: ${{ jobs.build.outputs.status }}
@@ -42,10 +46,16 @@ jobs:
           STAGE: ${{ inputs.stage }}
           ARTIFACT_ID: ${{ inputs.artifact-id }}
           EXPECTED_SHA256: ${{ inputs.sha256 }}
+          FINAL_STAGE: ${{ inputs.final }}
         run: |
           python3 - <<'PY'
           import os, re
-          for key, pattern in [('STAGE', r'0[1-8]'), ('ARTIFACT_ID', r'[1-9][0-9]*'), ('EXPECTED_SHA256', r'[0-9a-f]{64}')]:
+          for key, pattern in [
+              ('STAGE', r'0[1-8]'),
+              ('ARTIFACT_ID', r'[1-9][0-9]*'),
+              ('EXPECTED_SHA256', r'[0-9a-f]{64}'),
+              ('FINAL_STAGE', r'true|false'),
+          ]:
               if not re.fullmatch(pattern, os.environ[key]):
                   raise SystemExit('Invalid ' + key)
           PY
@@ -61,13 +71,16 @@ jobs:
           digest-mismatch: error
           # Deliberately omit github-token, repository, run-id and pattern.
       - name: Verify producer hash, consume chunks, restore tree
+        timeout-minutes: 40
         env:
           EXPECTED_SHA256: ${{ inputs.sha256 }}
         run: bash .github/scripts/restore.sh
       - name: Compile until completion or our orderly checkpoint deadline
         id: build
+        timeout-minutes: 280
         env:
           STAGE: ${{ inputs.stage }}
+          FINAL_STAGE: ${{ inputs.final }}
         run: bash .github/scripts/build.sh
       - name: Verify APK signature and assemble output
         if: steps.build.outputs.status == 'completed'
@@ -82,14 +95,14 @@ jobs:
           compression-level: 0
           retention-days: 14
       - name: Destructively checkpoint unfinished build
-        if: steps.build.outputs.status == 'running'
+        if: steps.build.outputs.status == 'running' && !inputs.final
         id: pack
         timeout-minutes: 45
         run: bash .github/scripts/pack.sh
       - name: Upload immutable checkpoint
-        if: steps.build.outputs.status == 'running'
+        if: steps.build.outputs.status == 'running' && !inputs.final
         id: upload
-        timeout-minutes: 30
+        timeout-minutes: 35
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: tree-${{ github.run_id }}-${{ github.run_attempt }}-${{ inputs.stage }}
