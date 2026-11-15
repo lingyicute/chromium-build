@@ -8,14 +8,14 @@ apk="$CR_ROOT/src/out/Release/apks/ChromePublic.apk"
 # Verify with SDK/JDK distributed through Chromium DEPS, not runner Android SDK.
 build_tools_root="$CR_ROOT/src/third_party/android_sdk/public/build-tools"
 [[ -d "$build_tools_root" ]] || fail 'Chromium-managed Android build-tools directory missing'
-apksigner=$(find "$build_tools_root" -mindepth 2 -maxdepth 2 -path "$build_tools_root/[!.]*/apksigner" -type f -executable | sort -V | tail -1)
+apksigner=$(find "$build_tools_root" -mindepth 2 -maxdepth 2 -path "$build_tools_root/[!.]*/apksigner" -xtype f -executable | sort -V | tail -1)
 [[ -n "$apksigner" ]] || fail 'Chromium-managed Android build-tools apksigner missing'
 build_tools_dir=$(dirname "$apksigner")
 export JAVA_HOME="$CR_ROOT/src/third_party/jdk/current"
 # Prepend Chromium JDK to clean system PATH because apksigner wrappers invoke `java` via PATH.
 export PATH="$JAVA_HOME/bin:/usr/bin:/bin:/usr/sbin:/sbin"
 [[ -x "$apksigner" && -x "$JAVA_HOME/bin/java" ]] || fail 'Chromium-managed APK verifier/JDK missing'
-"$apksigner" verify --verbose --print-certs "$apk" 2>&1 | tee "$release/apk-signature.txt"
+"$apksigner" verify --verbose --print-certs "$apk" 2>&1 | tee -i "$release/apk-signature.txt"
 aapt2="$build_tools_dir/aapt2"
 "$CR_PYTHON" - "$apk" "$CR_ROOT/metadata/build-lock.json" "$aapt2" <<'PY'
 import json, os, re, subprocess, sys, zipfile
