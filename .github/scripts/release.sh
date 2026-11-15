@@ -17,7 +17,8 @@ export PATH="$JAVA_HOME/bin:/usr/bin:/bin:/usr/sbin:/sbin"
 [[ -x "$apksigner" && -x "$JAVA_HOME/bin/java" ]] || fail 'Chromium-managed APK verifier/JDK missing'
 "$apksigner" verify --verbose --print-certs "$apk" 2>&1 | tee -i "$release/apk-signature.txt"
 aapt2="$build_tools_dir/aapt2"
-apk_meta="$RUNNER_TEMP/chromium-apk-meta.json"
+apk_meta="$TMPDIR/chromium-apk-meta.json"
+trap 'rm -f "$apk_meta"' EXIT
 "$CR_PYTHON" - "$apk" "$CR_ROOT/metadata/build-lock.json" "$aapt2" "$apk_meta" <<'PY'
 import json, os, re, subprocess, sys, zipfile
 from pathlib import Path
@@ -71,6 +72,7 @@ cp "$apk" "$release/Chromium-Stable-arm64.apk"
 cp -a "$CR_ROOT/metadata" "$release/metadata"
 # SHA256SUMS authenticates nothing on its own; it detects corruption only.
 (cd "$release" && find . -type f ! -name SHA256SUMS -printf '%P\0' | sort -z | xargs -0 sha256sum > SHA256SUMS)
+if [[ -n "${GITHUB_STEP_SUMMARY:-}" ]]; then
 "$CR_PYTHON" - "$release" "$apk_meta" <<'PY' >> "$GITHUB_STEP_SUMMARY"
 import json, sys
 from pathlib import Path
@@ -80,9 +82,10 @@ apk_meta = json.loads(Path(sys.argv[2]).read_text())
 lock = json.loads((release / 'metadata/build-lock.json').read_text())
 apk_path = release / 'Chromium-Stable-arm64.apk'
 apk_sha = next(
-    line.split()[0]
+    parts[0]
     for line in (release / 'SHA256SUMS').read_text().splitlines()
-    if line.endswith('  Chromium-Stable-arm64.apk')
+    for parts in (line.split('  ', 1),)
+    if len(parts) == 2 and parts[1] == 'Chromium-Stable-arm64.apk'
 )
 runners_path = release / 'metadata/runners.jsonl'
 records = [json.loads(line) for line in runners_path.read_text().splitlines() if line.strip()] if runners_path.is_file() else []
@@ -104,3 +107,4 @@ if records:
     print(f"- Compile stages: `{len(records)}` ({total_minutes:.1f} min total compile)")
 print('- Signing: upstream development signing key; NOT production-signed.')
 PY
+fi
