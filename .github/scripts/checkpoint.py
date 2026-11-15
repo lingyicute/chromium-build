@@ -2,6 +2,7 @@
 """Stream-split a checkpoint into hashed parts; verify each part BEFORE tar consumes it."""
 from concurrent.futures import ThreadPoolExecutor
 import hashlib
+import hmac
 import os
 from pathlib import Path
 import re
@@ -64,7 +65,10 @@ def sha256_file(path):
 
 def _manifest_bytes(directory):
     with (Path(directory) / MANIFEST).open('rb') as f:
-        return f.read(MAX_MANIFEST_BYTES + 1)
+        raw = f.read(MAX_MANIFEST_BYTES + 1)
+    if len(raw) > MAX_MANIFEST_BYTES:
+        raise ValueError(BAD_LAYOUT)
+    return raw
 
 
 def manifest(directory, expected):
@@ -72,9 +76,13 @@ def manifest(directory, expected):
     files = parts(directory)
     raw = _manifest_bytes(directory)
     if (not isinstance(expected, str) or not re.fullmatch(r'[0-9a-f]{64}', expected)
-            or hashlib.sha256(raw).hexdigest() != expected):
+            or not hmac.compare_digest(hashlib.sha256(raw).hexdigest(), expected)):
         raise ValueError(MISMATCH)
-    lines = raw.decode('ascii', 'replace').splitlines(keepends=True)
+    try:
+        text = raw.decode('ascii')
+    except UnicodeDecodeError as exc:
+        raise ValueError(BAD_LAYOUT) from exc
+    lines = text.splitlines(keepends=True)
     if len(lines) != len(files):
         raise ValueError(BAD_LAYOUT)
     entries = []
