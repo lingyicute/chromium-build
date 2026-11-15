@@ -562,6 +562,8 @@ class ResultVerdict(unittest.TestCase):
         ok, summary = self.verdict(prepare=('success', 'running'), part_01=('failure', 'completed'))
         self.assertFalse(ok)
         self.assertNotIn('APK completed in', summary)
+        self.assertIn('`part-01` built the APK', summary)
+        self.assertIn('`unverified-apk-*`', summary)
 
 
 if __name__ == '__main__':

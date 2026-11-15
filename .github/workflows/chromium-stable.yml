@@ -118,6 +118,9 @@ jobs:
               reason = f'APK completed in `{completed[-1]}`; see the `apk-*` artifact.'
           elif needs.get('prepare', {}).get('result') == 'skipped':
               reason = 'FAILED: `prepare` was skipped (workflow may only run from the default branch).'
+          elif completed:
+              reason = (f'FAILED: `{completed[-1]}` built the APK, but verifying or uploading it failed; '
+                        'an `unverified-apk-*` artifact may remain, for inspection only.')
           elif errors:
               reason = 'FAILED: required stage(s) failed or were cancelled: ' + ', '.join(errors) + '.'
           elif exhausted or needs.get('part-08', {}).get('result') == 'success':
