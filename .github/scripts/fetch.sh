@@ -16,12 +16,12 @@ version="${lock[0]}"; revision="${lock[1]}"; depot_revision="${lock[2]}"
 # A mismatch aborts, rather than silently falling back to main or another mirror.
 git init "$CR_ROOT/src"
 git -C "$CR_ROOT/src" remote add origin https://chromium.googlesource.com/chromium/src.git
-git -C "$CR_ROOT/src" -c fetch.fsckObjects=true fetch --no-tags --depth=1 origin "refs/tags/$version"
+retry git -C "$CR_ROOT/src" -c fetch.fsckObjects=true fetch --no-tags --depth=1 origin "refs/tags/$version"
 [[ "$(git -C "$CR_ROOT/src" rev-parse 'FETCH_HEAD^{commit}')" == "$revision" ]] || fail 'Stable tag/ChromiumDash commit mismatch'
 git -C "$CR_ROOT/src" checkout --detach "$revision"
 git init "$CR_ROOT/depot_tools"
 git -C "$CR_ROOT/depot_tools" remote add origin https://chromium.googlesource.com/chromium/tools/depot_tools.git
-git -C "$CR_ROOT/depot_tools" -c fetch.fsckObjects=true fetch --no-tags --depth=1 origin "$depot_revision"
+retry git -C "$CR_ROOT/depot_tools" -c fetch.fsckObjects=true fetch --no-tags --depth=1 origin "$depot_revision"
 git -C "$CR_ROOT/depot_tools" checkout --detach "$depot_revision"
 [[ "$(git -C "$CR_ROOT/depot_tools" rev-parse HEAD)" == "$depot_revision" ]] || fail 'depot_tools revision mismatch'
 cat > "$CR_ROOT/.gclient" <<'GCLIENT'
@@ -42,7 +42,7 @@ GCLIENT
 cd "$CR_ROOT"
 # All DEPS and hooks are upstream Chromium's. This is deliberately NOT a
 # network allowlist or a claim that every transitive dependency is first-party.
-gclient sync --nohooks --no-history --revision "src@$revision" --jobs=8
+retry gclient sync --nohooks --no-history --revision "src@$revision" --jobs=8
 [[ "$(git -C src rev-parse HEAD)" == "$revision" ]] || fail 'gclient changed source revision'
 python3 - <<'PY'
 import json, os
@@ -56,7 +56,7 @@ if actual != expected:
 PY
 # Do NOT run install-build-deps.sh: that would add an Ubuntu APT trust path.
 # Missing system libraries/tools fail visibly instead of fetching alternatives.
-gclient runhooks
+retry gclient runhooks
 gclient revinfo > "$CR_ROOT/metadata/dependencies.txt"
 cp "$CR_ROOT/src/DEPS" "$CR_ROOT/metadata/DEPS"
 mkdir -p "$CR_ROOT/src/out/Release"

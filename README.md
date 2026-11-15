@@ -10,7 +10,7 @@
     chromium-stable.yml       # 手动触发、准备、最多 8 段、最终检查
     chromium-stage.yml        # 本仓库内复用的单段 job，不是 composite Action
   scripts/
-    common.sh                # 固定绝对路径与工具缓存位置
+    common.sh                # 固定绝对路径、工具缓存位置与网络重试
     host.sh                  # 临时 VM 清理、/ 上建 swap、资源检查，不安装系统包
     resolve.py               # 解析一次 Android Stable，验证 JSON
     fetch.sh                 # 源码与工具链锁定、同步、hooks、GN
@@ -115,7 +115,7 @@ Android stable 的版本不是写死的；每次新 workflow run 从官方 API �
 ## 故障与重跑
 
 - tag/SHA 不匹配：可能是上游发布记录/仓库更新的时间差，或元数据异常。检查官方记录，稍后启动新 run。
-- `gclient` / hooks 失败：查看 prepare 日志；网络失败可以重跑。
+- `gclient` / hooks 失败：源码 fetch、`gclient sync` 与 hooks 会针对同一官方来源和版本各自最多尝试 3 次（不切换镜像或版本）；仍失败时查看 prepare 日志，网络问题可以重跑。
 - `GN --fail-on-unused-args` 失败：新版上游可能调整参数，需要人工审查 `config/args.gn`。不静默忽略未知参数。
 - artifact 摘要不符：停止；不要关闭验证。重新获取或重新构建，并核查生产者。
 - 编译 job 失败：在检查点仍存在的前提下，可尝试 GitHub 的 **Re-run failed jobs**。它仍属于原 run，artifact ID/输出必须可用；新 attempt 使用独立命名。若 GitHub 未保留所需 job 输出或 artifact 已过期，启动新 run。

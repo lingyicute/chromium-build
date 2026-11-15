@@ -22,3 +22,14 @@ unset GIT_CACHE_PATH CCACHE_DIR CCACHE_PREFIX GOOGLE_APPLICATION_CREDENTIALS \
   ANDROID_NDK_ROOT ANDROID_NDK_LATEST_HOME JAVA_HOME
 mkdir -p "$CR_LOGS"
 fail() { echo "::error::$*" >&2; exit 1; }
+# Re-run an idempotent network step against the SAME official source and
+# revision; never falls back to another mirror, branch, or version.
+retry() {
+  local attempt
+  for attempt in 1 2 3; do
+    "$@" && return 0
+    (( attempt < 3 )) || fail "Failed after 3 attempts: $*"
+    echo "::warning::Attempt $attempt failed, retrying: $*" >&2
+    sleep $(( attempt * ${CR_RETRY_DELAY:-30} ))
+  done
+}

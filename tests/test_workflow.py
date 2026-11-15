@@ -297,6 +297,34 @@ class Deadline(unittest.TestCase):
         self.assertEqual(build.compute_budget(1000, 1000 + 80 * 60, final_stage=True), 250 * 60)
 
 
+class Retry(unittest.TestCase):
+    def run_retry(self, body):
+        with tempfile.TemporaryDirectory() as tmp:
+            return subprocess.run(
+                ['bash', '-c', 'source "$1/common.sh"; ' + body, '_', str(ROOT / '.github/scripts')],
+                env=dict(os.environ, RUNNER_TEMP=tmp, CR_RETRY_DELAY='0'),
+                capture_output=True, text=True, cwd=tmp)
+
+    def test_retries_until_success(self):
+        p = self.run_retry('n=0; flaky() { n=$((n + 1)); (( n >= 3 )); }; retry flaky; echo "attempts=$n"')
+        self.assertEqual(p.returncode, 0, p.stderr)
+        self.assertEqual(p.stdout.strip(), 'attempts=3')
+        self.assertEqual(p.stderr.count('::warning::'), 2)
+
+    def test_gives_up_after_three_attempts(self):
+        p = self.run_retry('broken() { echo try; return 1; }; retry broken; echo unreachable')
+        self.assertEqual(p.returncode, 1)
+        self.assertEqual(p.stdout.split(), ['try', 'try', 'try'])
+        self.assertIn('::error::Failed after 3 attempts: broken', p.stderr)
+
+    def test_fetch_network_steps_use_retry(self):
+        fetch = (ROOT / '.github/scripts/fetch.sh').read_text()
+        for step in ('git -C "$CR_ROOT/src" -c fetch.fsckObjects=true fetch',
+                     'git -C "$CR_ROOT/depot_tools" -c fetch.fsckObjects=true fetch',
+                     'gclient sync', 'gclient runhooks'):
+            self.assertIn('\nretry ' + step, fetch)
+
+
 class StaticPolicy(unittest.TestCase):
     def test_actions(self):
         allowed = {
