@@ -1,14 +1,16 @@
 #!/usr/bin/env bash
 source "$(dirname "$0")/common.sh"
+# Verify restored tree using only OS tools, never restored depot_tools wrappers.
+export PATH="/usr/bin:/bin:/usr/sbin:/sbin"
 [[ -z "$(ls -A "$CR_ROOT")" ]] || fail 'Restore destination must be empty'
-python3 "$GITHUB_WORKSPACE/.github/scripts/checkpoint.py" restore-stream "$CR_TRANSFER/checkpoint" \
+"$CR_PYTHON" "$GITHUB_WORKSPACE/.github/scripts/checkpoint.py" restore-stream "$CR_TRANSFER/checkpoint" \
   | zstd -d -c | tar --no-same-owner -xpf - -C "$CR_ROOT"
-python3 - <<'PY'
+"$CR_PYTHON" - <<'PY'
 import json, os, subprocess
 from pathlib import Path
-root=Path(os.environ['CR_ROOT'])
-lock=json.loads((root/'metadata/build-lock.json').read_text())
-for field, env in [('repository','GITHUB_REPOSITORY'),('run_id','GITHUB_RUN_ID'),('workflow_sha','GITHUB_SHA')]:
+root = Path(os.environ['CR_ROOT'])
+lock = json.loads((root / 'metadata/build-lock.json').read_text())
+for field, env in [('repository', 'GITHUB_REPOSITORY'), ('run_id', 'GITHUB_RUN_ID'), ('workflow_sha', 'GITHUB_SHA')]:
     if lock[field] != os.environ[env]:
         raise SystemExit(f'Checkpoint {field} is from another run/repository/commit')
 workspace = Path(os.environ['GITHUB_WORKSPACE'])
@@ -23,6 +25,9 @@ if (root / 'src/out/Release/args.gn').read_bytes() != (workspace / 'config/args.
     raise SystemExit('GN arguments changed')
 if not (root / 'src/out/Release/build.ninja').is_file():
     raise SystemExit('Restored build tree is missing out/Release/build.ninja')
+ninja = root / 'src/third_party/ninja/ninja'
+if not (ninja.is_file() and os.access(ninja, os.X_OK)):
+    raise SystemExit('Restored build tree is missing executable third_party/ninja/ninja')
 PY
 # No gclient sync, runhooks, or gn gen here: keep all build inputs and mtimes.
 rmdir "$CR_TRANSFER/checkpoint"
