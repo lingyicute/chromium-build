@@ -33,9 +33,9 @@ with zipfile.ZipFile(apk_path) as zf:
 names = {info.filename for info in infos}
 if 'AndroidManifest.xml' not in names:
     raise SystemExit('APK missing non-empty AndroidManifest.xml')
-if not any(name.endswith('.dex') for name in names):
-    raise SystemExit('APK missing non-empty DEX bytecode')
-if not any(name.startswith('lib/arm64-v8a/') and name.endswith('.so') for name in names):
+if 'classes.dex' not in names:
+    raise SystemExit('APK missing non-empty root classes.dex')
+if not any(re.fullmatch(r'lib/arm64-v8a/[^/]+\.so', name) for name in names):
     raise SystemExit('APK missing non-empty arm64-v8a native library')
 
 if not (aapt2.is_file() and os.access(aapt2, os.X_OK)):
