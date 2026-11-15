@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 source "$(dirname "$0")/common.sh"
 mkdir -p "$HOME" "$CR_ROOT/cache" "$CR_ROOT/metadata" "$CIPD_CACHE_DIR"
-python3 "$GITHUB_WORKSPACE/.github/scripts/resolve.py"
-readarray -t lock < <(python3 - <<'PY'
+"$CR_PYTHON" "$GITHUB_WORKSPACE/.github/scripts/resolve.py"
+readarray -t lock < <("$CR_PYTHON" - <<'PY'
 import json, os
 with open(os.environ['CR_ROOT'] + '/metadata/build-lock.json') as f:
     x = json.load(f)
@@ -44,7 +44,7 @@ cd "$CR_ROOT"
 # network allowlist or a claim that every transitive dependency is first-party.
 retry gclient sync --nohooks --no-history --revision "src@$revision" --jobs=8
 [[ "$(git -C src rev-parse HEAD)" == "$revision" ]] || fail 'gclient changed source revision'
-python3 - <<'PY'
+"$CR_PYTHON" - <<'PY'
 import json, os
 from pathlib import Path
 root = Path(os.environ['CR_ROOT'])
