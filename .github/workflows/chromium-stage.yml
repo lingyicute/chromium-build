@@ -113,9 +113,22 @@ jobs:
         run: bash .github/scripts/release.sh
       - name: Upload APK and build record (not a GitHub Release)
         if: steps.build.outputs.status == 'completed'
+        id: apk
+        # Until this succeeds, the finished APK exists only on this runner.
+        continue-on-error: true
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: apk-${{ github.run_id }}-${{ github.run_attempt }}-${{ inputs.stage }}
+          path: ${{ runner.temp }}/chromium-release/
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 14
+      - name: Retry the APK upload once
+        if: steps.build.outputs.status == 'completed' && steps.apk.outcome != 'success'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          # New name: the failed attempt may have left a partial artifact behind.
+          name: apk-${{ github.run_id }}-${{ github.run_attempt }}-${{ inputs.stage }}-retry
           path: ${{ runner.temp }}/chromium-release/
           if-no-files-found: error
           compression-level: 0
