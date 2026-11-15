@@ -104,16 +104,43 @@ def manifest(directory, expected):
     entries = []
     for path, line in zip(files, lines):
         m = MANIFEST_LINE.fullmatch(line)
+        try:
+            st = path.lstat()
+        except OSError as exc:
+            raise ValueError(BAD_LAYOUT) from exc
         # A wrong size (e.g. a truncated download) is caught before any byte is streamed.
-        if not m or m[3] != path.name or int(m[2]) != path.lstat().st_size:
+        if not m or m[3] != path.name or not stat.S_ISREG(st.st_mode) or int(m[2]) != st.st_size:
             raise ValueError(BAD_LAYOUT)
         entries.append((path, (m[1], int(m[2]))))
     return entries
 
 
+def _verify_and_open(path, entry):
+    expected_digest, expected_size = entry
+    f = _open_regular_ro(path)
+    try:
+        h = hashlib.sha256()
+        buf = bytearray(IO_BUFFER)
+        view = memoryview(buf)
+        size = 0
+        while True:
+            n = f.readinto(buf)
+            if not n:
+                break
+            h.update(view[:n])
+            size += n
+        if size != expected_size or not hmac.compare_digest(h.hexdigest(), expected_digest):
+            raise ValueError(MISMATCH)
+        f.seek(0)
+        return f
+    except BaseException:
+        f.close()
+        raise
+
+
 def verify_part(path, entry):
-    if sha256_file(path) != entry:
-        raise ValueError(MISMATCH)
+    with _verify_and_open(path, entry):
+        pass
 
 
 def digest(directory):
@@ -199,24 +226,31 @@ def restore_stream(directory, expected, out_stream):
     # own check. The next part is hashed meanwhile on a helper thread, so that
     # disk read overlaps extraction and the part is streamed from the page cache.
     with ThreadPoolExecutor(max_workers=1) as pool:
-        check = pool.submit(verify_part, *entries[0])
-        for n, (path, (_, expected_size)) in enumerate(entries):
-            check.result()
-            if n + 1 < len(entries):
-                check = pool.submit(verify_part, *entries[n + 1])
-            part_bytes = 0
-            with _open_regular_ro(path) as f:
-                while True:
-                    size = f.readinto(buf)
-                    if not size:
-                        break
-                    out_stream.write(view[:size])
-                    part_bytes += size
-            if part_bytes != expected_size:
-                raise ValueError(MISMATCH)
-            total_bytes += part_bytes
-            out_stream.flush()
-            path.unlink()
+        next_check = pool.submit(_verify_and_open, *entries[0])
+        try:
+            for n, (path, (_, expected_size)) in enumerate(entries):
+                f = next_check.result()
+                next_check = (pool.submit(_verify_and_open, *entries[n + 1])
+                              if n + 1 < len(entries) else None)
+                part_bytes = 0
+                with f:
+                    while True:
+                        size = f.readinto(buf)
+                        if not size:
+                            break
+                        out_stream.write(view[:size])
+                        part_bytes += size
+                if part_bytes != expected_size:
+                    raise ValueError(MISMATCH)
+                total_bytes += part_bytes
+                out_stream.flush()
+                path.unlink()
+        finally:
+            if next_check is not None:
+                try:
+                    next_check.result().close()
+                except Exception:
+                    pass
     (Path(directory) / MANIFEST).unlink()
     return len(entries), total_bytes
 
