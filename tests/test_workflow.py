@@ -406,14 +406,32 @@ class Supervisor(unittest.TestCase):
         self.assertEqual((record['stage'], record['status'], record['final_stage']), ('03', 'completed', False))
         self.assertEqual(record['jobs'], build.compute_jobs())
         self.assertGreaterEqual(record['setup_seconds'], 0)
+        self.assertIn('swap_out_mib', record)
+        self.assertIsInstance(record['disk_free_gib'], float)
         self.assertRegex(files['summary'], r'^- Stage 03: `completed` after compiling for \d+\.\d min with -j\d+; '
-                                           r'setup before compiling .* took \d+\.\d min\.\n$')
+                                           r'setup before compiling .* took \d+\.\d min\.\n'
+                                           r'- Stage 03 resources: (?:\d+|unknown) MiB written to swap while '
+                                           r'compiling, \d+\.\d GiB left free on the build disk\.\n$')
 
     def test_failed_build_reports_no_status(self):
         p, files = self.run_main('exit 1')
         self.assertNotEqual(p.returncode, 0)
         self.assertIn('NOT checkpointing: failed:1', p.stderr)
+        # Memory pressure and disk headroom are what most often explain a failed compile.
+        self.assertRegex(p.stderr, r'failed:1; (?:\d+|unknown) MiB written to swap .* GiB left free')
         self.assertEqual((files['output'], files['root/metadata/runners.jsonl']), ('', ''))
+
+    def test_resource_probes_never_raise(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            vmstat = Path(tmp) / 'vmstat'
+            vmstat.write_text('pswpin 7\npswpout 3\n')
+            self.assertEqual(build.swapped_out_bytes(vmstat), 3 * os.sysconf('SC_PAGE_SIZE'))
+            for text in ('pswpin 7\n', 'pswpout many\n'):
+                vmstat.write_text(text)
+                self.assertIsNone(build.swapped_out_bytes(vmstat))
+            self.assertIsNone(build.swapped_out_bytes(Path(tmp) / 'missing'))
+            self.assertIsInstance(build.free_gib(tmp), float)
+            self.assertIsNone(build.free_gib(Path(tmp) / 'missing'))
 
     def test_spent_budget_refuses_to_start(self):
         p, files = self.run_main('exit 0', started_minutes_ago=build.NORMAL_JOB_DEADLINE_SECONDS // 60)

@@ -126,6 +126,28 @@ def summarize(line):
         pass
 
 
+def swapped_out_bytes(vmstat='/proc/vmstat'):
+    """Bytes written to swap since boot (None if unknown); a diagnostic only."""
+    try:
+        with open(vmstat) as f:
+            for line in f:
+                key, _, value = line.partition(' ')
+                if key == 'pswpout':
+                    return int(value) * os.sysconf('SC_PAGE_SIZE')
+    except (OSError, ValueError):
+        pass
+    return None
+
+
+def free_gib(path):
+    """Space left for unprivileged writes under path (None if unknown)."""
+    try:
+        st = os.statvfs(path)
+    except OSError:
+        return None
+    return round(st.f_bavail * st.f_frsize / 2**30, 1)
+
+
 def main():
     def _handle_sigterm(signum, frame):
         raise SystemExit(f'Build supervisor terminated by signal {signum}')
@@ -146,18 +168,26 @@ def main():
     env.setdefault('NINJA_STATUS', '[%f/%t %es] ')
     print(f'Building locally, jobs={jobs}, budget={remaining/60:.0f} minutes, final={final_stage}', flush=True)
     t0 = monotonic_now()
+    swap_before = swapped_out_bytes()
     status = supervise(['third_party/ninja/ninja', '-C', 'out/Release',
                         f'-j{jobs}', 'chrome_public_apk'], remaining, env=env)
     elapsed = round(monotonic_now() - t0, 1)
+    # Memory pressure and disk headroom: what the -j cap and later stages depend on.
+    swap_after, disk_free = swapped_out_bytes(), free_gib(root)
+    swap_mib = None if None in (swap_before, swap_after) else round((swap_after - swap_before) / 2**20)
+    usage = (f"{'unknown' if swap_mib is None else swap_mib} MiB written to swap while compiling, "
+             f"{'unknown' if disk_free is None else disk_free} GiB left free on the build disk")
     if status.startswith('failed:'):
-        raise SystemExit(f'Build failed after {elapsed:.1f}s, NOT checkpointing: {status}')
+        # Heavy swapping or a full disk explains many failures (e.g. an OOM kill or ENOSPC).
+        raise SystemExit(f'Build failed after {elapsed:.1f}s, NOT checkpointing: {status}; {usage}')
     if status == 'running' and final_stage:
         status = 'exhausted'
     record = dict(stage=os.environ['STAGE'], image_os=os.environ.get('ImageOS'),
                   image_version=os.environ.get('ImageVersion'), jobs=jobs,
                   run_attempt=os.environ['GITHUB_RUN_ATTEMPT'],
                   final_stage=final_stage, budget_minutes=round(remaining / 60, 1),
-                  setup_seconds=setup, elapsed_seconds=elapsed, status=status)
+                  setup_seconds=setup, elapsed_seconds=elapsed, status=status,
+                  swap_out_mib=swap_mib, disk_free_gib=disk_free)
     with (root / 'metadata/runners.jsonl').open('a') as f:
         f.write(json.dumps(record) + '\n')
     with open(os.environ['GITHUB_OUTPUT'], 'a') as f:
@@ -165,6 +195,7 @@ def main():
     print(f'Stage result: {status} ({elapsed:.1f}s)', flush=True)
     summarize(f"- Stage {os.environ['STAGE']}: `{status}` after compiling for {elapsed / 60:.1f} min with -j{jobs}; "
               f'setup before compiling (runner prep, then fetch or download and restore) took {setup / 60:.1f} min.')
+    summarize(f"- Stage {os.environ['STAGE']} resources: {usage}.")
 
 
 if __name__ == '__main__':
