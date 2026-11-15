@@ -526,13 +526,29 @@ class StaticPolicy(unittest.TestCase):
         self.assertIn('apk="$CR_ROOT/src/out/Release/apks/ChromePublic.apk"\n',
                       (ROOT / '.github/scripts/release.sh').read_text())
 
-    def test_retried_download_still_leaves_compile_budget(self):
+    @staticmethod
+    def stage_steps():
         stage = (ROOT / '.github/workflows/chromium-stage.yml').read_text()
-        steps = re.split(r'\n      - ', stage.split('\n    steps:\n', 1)[1])
-        minutes = [int(re.search(r'timeout-minutes: (\d+)', step)[1]) for step in steps
-                   if "if: inputs.stage != '00'" in step and 'timeout-minutes' in step]
-        # Download, its one retry, and restore: even the worst case must leave time to compile.
-        self.assertEqual(minutes, [70, 70, 40])
+        return re.split(r'\n      - ', stage.split('\n    steps:\n', 1)[1])
+
+    def step_timeout(self, name):
+        step, = [step for step in self.stage_steps() if step.startswith(f'name: {name}')]
+        return int(re.search(r'^        timeout-minutes: (\d+)$', step, re.M)[1])
+
+    def test_every_stage_step_is_time_boxed(self):
+        # continue-on-error tolerates a failure, not a hang: an unbounded step would
+        # run into the 350-minute job limit and take the whole stage down with it.
+        for step in self.stage_steps():
+            self.assertRegex(step, r'\n        timeout-minutes: [1-9][0-9]*\n', step.splitlines()[0])
+
+    def test_retried_download_still_leaves_compile_budget(self):
+        minutes = [self.step_timeout(name) for name in (
+            'Prepare disposable hosted runner', 'Download exact checkpoint ID',
+            'Discard the partial checkpoint download', 'Retry the checkpoint download once',
+            'Verify producer hash')]
+        # Runner prep, download, discarding it, its one retry, and restore: even the
+        # worst case must leave time to compile.
+        self.assertEqual(minutes, [15, 70, 2, 70, 40])
         self.assertLess(sum(minutes) * 60 + build.MIN_BUDGET_SECONDS, build.NORMAL_JOB_DEADLINE_SECONDS)
 
     def test_final_stage_and_budget_invariants(self):
@@ -541,11 +557,19 @@ class StaticPolicy(unittest.TestCase):
         self.assertEqual(len(re.findall(r'^\s+final:\s*true\s*$', stable, re.M)), 1)
         self.assertRegex(stable, r'part-08:[\s\S]*?final:\s*true[\s\S]*?result:')
         self.assertIn("if: steps.build.outputs.status == 'running' && !inputs.final", stage)
-        # Normal stage worst-case: 265m budget + 3m grace + 45m pack + 35m upload + 1m logs = 349m < 350m.
-        logs = int(re.search(r'name: Save stage logs\n(?:.*\n)*?\s+timeout-minutes: (\d+)', stage)[1])
-        self.assertLessEqual(build.NORMAL_JOB_DEADLINE_SECONDS // 60 + 3 + 45 + 35 + logs, 350)
-        # Final stage worst-case: 330m budget + 3m grace + 10m release/upload < 350m.
-        self.assertLessEqual(build.FINAL_JOB_DEADLINE_SECONDS // 60 + 3 + 10, 350)
+        grace, logs = 3, self.step_timeout('Save stage logs')  # build.supervise() waits 180 s for Ninja.
+        # host.sh records the start only after job setup, checkout and input validation, so
+        # leave those a minute of the 350-minute job limit.
+        limit = 350 - 1
+        # Normal stage: 265m budget + 3m grace + 45m pack + 35m upload + 1m logs = 349m; the
+        # upload retry is best effort.
+        self.assertLessEqual(build.NORMAL_JOB_DEADLINE_SECONDS // 60 + grace + self.step_timeout('Destructively')
+                             + self.step_timeout('Upload immutable checkpoint') + logs, limit)
+        # Final stage: 330m budget + 3m grace, then verify, upload, its retry and the unverified
+        # fallback each run to their limit, and the logs are still saved in time.
+        post_build = sum(self.step_timeout(name) for name in (
+            'Verify APK signature', 'Upload APK', 'Retry the APK upload', 'Keep the unverified APK'))
+        self.assertLessEqual(build.FINAL_JOB_DEADLINE_SECONDS // 60 + grace + post_build + logs, limit)
         # The compile step backstop must never cut off an orderly final-stage stop.
         step_timeout = int(re.search(r'id: build\n(?:\s+#.*\n)*\s+timeout-minutes: (\d+)', stage)[1])
         self.assertGreaterEqual(step_timeout, build.FINAL_JOB_DEADLINE_SECONDS // 60 + 3)
