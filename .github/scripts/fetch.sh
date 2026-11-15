@@ -65,8 +65,10 @@ cp "$GITHUB_WORKSPACE/config/args.gn" "$CR_ROOT/metadata/args.gn"
 cd "$CR_ROOT/src"
 [[ -x buildtools/linux64/gn && -x third_party/ninja/ninja ]] || fail 'Expected Chromium GN/Ninja binaries missing'
 buildtools/linux64/gn gen out/Release --fail-on-unused-args
+[[ -f out/Release/build.ninja ]] || fail 'gn gen did not produce out/Release/build.ninja'
 # Record GN's effective arguments, not just the overrides.
 buildtools/linux64/gn args out/Release --list --short > "$CR_ROOT/metadata/effective-args.txt"
-# Reclaim transient CIPD instance zip cache before checkpointing.
+# Reclaim transient CIPD download cache and temp files before compiling.
 rm -rf "$CIPD_CACHE_DIR"
+find "$TMPDIR" -mindepth 1 -delete
 df -h /mnt
