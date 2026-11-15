@@ -31,6 +31,8 @@ unset GIT_CACHE_PATH CCACHE_DIR CCACHE_PREFIX GOOGLE_APPLICATION_CREDENTIALS \
   CC CXX CFLAGS CXXFLAGS CPPFLAGS LDFLAGS \
   GIT_CONFIG_GLOBAL GIT_CONFIG_SYSTEM GIT_CONFIG_PARAMETERS GIT_CONFIG_COUNT
 mkdir -p "$CR_LOGS" "$TMPDIR"
+trap 'echo "::error::Interrupted (signal INT), aborting" >&2; exit 130' INT
+trap 'echo "::error::Terminated (signal TERM), aborting" >&2; exit 143' TERM
 fail() { echo "::error::$*" >&2; exit 1; }
 # Re-run an idempotent network step against the SAME official source and
 # revision; never falls back to another mirror, branch, or version.
