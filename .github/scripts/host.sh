@@ -18,9 +18,15 @@ done
 # what makes room for the swap below.
 # Fixed paths only; no downloaded cleanup script, docker image, or action.
 # Preserve /opt/hostedtoolcache and runner externals (Node required by actions).
-sudo rm -rf -- /usr/local/lib/android /usr/local/.ghcup /usr/share/dotnet \
+# Unlinking is metadata-bound: delete the trees concurrently, and prepare /mnt
+# meanwhile; only the swap file below needs the space they free on /.
+cleanup=()
+for dir in /usr/local/lib/android /usr/local/.ghcup /usr/share/dotnet \
   /usr/share/swift /usr/local/share/powershell /usr/lib/google-cloud-sdk \
-  /opt/ghc /opt/az
+  /opt/ghc /opt/az; do
+  sudo rm -rf -- "$dir" &
+  cleanup+=("$!")
+done
 sudo mkdir -p /mnt/chromium-relay /mnt/chromium-transfer
 sudo chown "$(id -u):$(id -g)" /mnt/chromium-relay /mnt/chromium-transfer
 # The image ships its own swap file on /mnt; reclaim that space for the tree.
@@ -28,6 +34,8 @@ while IFS= read -r dev; do
   [[ "$dev" == /mnt/* ]] || continue
   sudo swapoff "$dev" && sudo rm -f "$dev"
 done < <(swapon --show=NAME --noheadings --raw)
+# `wait PID` returns that deletion's own status, so set -e still stops on failure.
+for pid in "${cleanup[@]}"; do wait "$pid"; done
 # Swap is only a fallback for linker/R8 peaks, not a replacement for physical
 # RAM. 16 GiB target; shrink only if / is unexpectedly small, never below 8 GiB.
 swap_gib=16
