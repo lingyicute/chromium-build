@@ -152,6 +152,26 @@ def digest(directory):
     return expected
 
 
+def _open_exclusive_wo(path):
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, 'O_NOFOLLOW', 0)
+    fd = os.open(path, flags, 0o644)
+    try:
+        return os.fdopen(fd, 'wb')
+    except BaseException:
+        os.close(fd)
+        raise
+
+
+def _write_all(stream, data):
+    view = memoryview(data)
+    written = 0
+    while written < len(view):
+        n = stream.write(view[written:])
+        if not n:
+            raise OSError('Short write to checkpoint stream')
+        written += n
+
+
 def pack_stream(directory, in_stream, chunk_size=CHUNK_SIZE):
     if isinstance(chunk_size, bool) or not isinstance(chunk_size, int) or chunk_size <= 0:
         raise ValueError('chunk_size must be positive')
@@ -180,12 +200,12 @@ def pack_stream(directory, in_stream, chunk_size=CHUNK_SIZE):
                     raise ValueError('Checkpoint exceeded maximum part count')
                 name = part_name(len(lines))
                 part_path = dest / name
-                out = part_path.open('wb')
+                out = _open_exclusive_wo(part_path)
                 created.append(part_path)
                 h = hashlib.sha256()
                 written = 0
             chunk = read_slice[:n]
-            out.write(chunk)
+            _write_all(out, chunk)
             h.update(chunk)
             written += n
             total_bytes += n
@@ -201,8 +221,11 @@ def pack_stream(directory, in_stream, chunk_size=CHUNK_SIZE):
             raise ValueError('Empty checkpoint stream')
         data = ''.join(lines).encode('ascii')
         manifest_path = dest / MANIFEST
-        manifest_path.write_bytes(data)
+        out = _open_exclusive_wo(manifest_path)
         created.append(manifest_path)
+        _write_all(out, data)
+        out.close()
+        out = None
     except BaseException:
         if out is not None:
             out.close()
@@ -238,7 +261,7 @@ def restore_stream(directory, expected, out_stream):
                         size = f.readinto(buf)
                         if not size:
                             break
-                        out_stream.write(view[:size])
+                        _write_all(out_stream, view[:size])
                         part_bytes += size
                 if part_bytes != expected_size:
                     raise ValueError(MISMATCH)
@@ -289,7 +312,7 @@ def main():
         print(sha256)
     elif operation == 'restore-stream' and len(args) == 2:
         t0 = time.monotonic()
-        count, total = restore_stream(directory, os.environ['EXPECTED_SHA256'], sys.stdout.buffer)
+        count, total = restore_stream(directory, os.environ.get('EXPECTED_SHA256', ''), sys.stdout.buffer)
         elapsed = max(time.monotonic() - t0, 1e-6)
         rate = total / (1024 * 1024) / elapsed
         report(f'Verified and streamed {count} checkpoint part(s), {total} bytes ({total / 2**30:.2f} GiB) in {elapsed:.1f}s ({rate:.1f} MiB/s)')
