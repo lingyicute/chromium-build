@@ -105,14 +105,17 @@ jobs:
           NEEDS_JSON: ${{ toJSON(needs) }}
         shell: bash
         run: |
-          python3 - <<'PY'
+          /usr/bin/python3 - <<'PY'
           import json, os
           needs = json.loads(os.environ['NEEDS_JSON'])
           order = ['prepare'] + [f'part-{i:02d}' for i in range(1, 9)]
+          def stage_status(name):
+              return ((needs.get(name, {}).get('outputs') or {}).get('status') or '')
           errors = [name for name in order if needs.get(name, {}).get('result') in ('failure', 'cancelled')]
-          completed = [name for name in order if needs.get(name, {}).get('outputs', {}).get('status') == 'completed']
-          exhausted = any(needs.get(name, {}).get('outputs', {}).get('status') == 'exhausted' for name in order)
-          ok = bool(completed) and not errors and all(needs.get(name, {}).get('result') == 'success' for name in completed)
+          completed = [name for name in order if stage_status(name) == 'completed']
+          exhausted = any(stage_status(name) == 'exhausted' for name in order)
+          all_clean = all(needs.get(name, {}).get('result') in ('success', 'skipped') for name in order)
+          ok = len(completed) == 1 and all_clean and needs.get(completed[0], {}).get('result') == 'success'
 
           if ok:
               reason = f'APK completed in `{completed[-1]}`; see the `apk-*` artifact.'
@@ -128,14 +131,16 @@ jobs:
           else:
               reason = 'FAILED: no stage produced a completed APK. Inspect stage logs.'
 
-          with open(os.environ['GITHUB_STEP_SUMMARY'], 'a') as f:
-              f.write('## Chromium Stable Android arm64\n')
-              f.write(reason + '\n\n')
-              f.write('| Stage | Result | Output status |\n|---|---|---|\n')
-              for name in order:
-                  job = needs.get(name, {})
-                  f.write(f"| `{name}` | `{job.get('result', 'unknown')}` | `{job.get('outputs', {}).get('status', '-')}` |\n")
-              f.write('\nDevelopment signing key only. Not a production release.\n')
+          summary = os.environ.get('GITHUB_STEP_SUMMARY')
+          if summary:
+              with open(summary, 'a') as f:
+                  f.write('## Chromium Stable Android arm64\n')
+                  f.write(reason + '\n\n')
+                  f.write('| Stage | Result | Output status |\n|---|---|---|\n')
+                  for name in order:
+                      job = needs.get(name, {})
+                      f.write(f"| `{name}` | `{job.get('result', 'unknown')}` | `{stage_status(name) or '-'}` |\n")
+                  f.write('\nDevelopment signing key only. Not a production release.\n')
           if not ok:
               raise SystemExit(reason)
           PY
