@@ -80,7 +80,7 @@ jobs:
         run: |
           set -Eeuo pipefail
           timeout --signal=INT --kill-after=120s 240m bash .github/scripts/fetch.sh 2>&1 \
-            | tee "$RUNNER_TEMP/chromium-logs/prepare.log"
+            | tee -i "$RUNNER_TEMP/chromium-logs/prepare.log"
       - name: Save source resolution and GN configuration
         if: inputs.stage == '00'
         # A record only: the same metadata travels in the checkpoint and ships with the APK.
