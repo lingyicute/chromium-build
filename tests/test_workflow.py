@@ -436,8 +436,13 @@ class StaticPolicy(unittest.TestCase):
             return [line for line in lines if line and not line.startswith('#')]
 
         tolerated = [step for step in steps if 'continue-on-error: true' in step]
-        self.assertEqual(len(tolerated), 3)
-        for step in tolerated:
+        # Uploads that nothing consumes may fail without failing the stage; every other
+        # tolerated step is a transfer that a later step repeats once.
+        diagnostic = [step for step in tolerated if step.startswith('name: Save ')]
+        self.assertEqual([step.split('\n', 1)[0] for step in diagnostic], ['name: Save stage logs'])
+        retried = [step for step in tolerated if step not in diagnostic]
+        self.assertEqual(len(retried), 3)
+        for step in retried:
             step_id = re.search(r'^        id: (\S+)$', step, re.M)[1]
             action = re.search(r'uses: (\S+)', step)[1]
             retries = [other for other in steps
@@ -478,8 +483,9 @@ class StaticPolicy(unittest.TestCase):
         self.assertEqual(len(re.findall(r'^\s+final:\s*true\s*$', stable, re.M)), 1)
         self.assertRegex(stable, r'part-08:[\s\S]*?final:\s*true[\s\S]*?result:')
         self.assertIn("if: steps.build.outputs.status == 'running' && !inputs.final", stage)
-        # Normal stage worst-case: 265m budget + 3m grace + 45m pack + 35m upload = 348m < 350m.
-        self.assertLessEqual(build.NORMAL_JOB_DEADLINE_SECONDS // 60 + 3 + 45 + 35, 350)
+        # Normal stage worst-case: 265m budget + 3m grace + 45m pack + 35m upload + 1m logs = 349m < 350m.
+        logs = int(re.search(r'name: Save stage logs\n(?:.*\n)*?\s+timeout-minutes: (\d+)', stage)[1])
+        self.assertLessEqual(build.NORMAL_JOB_DEADLINE_SECONDS // 60 + 3 + 45 + 35 + logs, 350)
         # Final stage worst-case: 330m budget + 3m grace + 10m release/upload < 350m.
         self.assertLessEqual(build.FINAL_JOB_DEADLINE_SECONDS // 60 + 3 + 10, 350)
         # The compile step backstop must never cut off an orderly final-stage stop.

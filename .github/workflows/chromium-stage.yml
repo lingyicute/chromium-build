@@ -196,6 +196,10 @@ jobs:
           overwrite: false
       - name: Save stage logs
         if: always()
+        # Diagnostics must never fail a stage whose checkpoint or APK is already
+        # safe, nor push the worst-case schedule past the job limit.
+        timeout-minutes: 1
+        continue-on-error: true
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: logs-${{ github.run_id }}-${{ github.run_attempt }}-${{ inputs.stage }}
