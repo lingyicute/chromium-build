@@ -4,6 +4,7 @@ import datetime
 import email.utils
 import http.client
 import json
+import math
 import os
 from pathlib import Path
 import re
@@ -86,8 +87,12 @@ def fetch_release_json(url=URL, timeout=90, attempts=FETCH_ATTEMPTS,
                        retry_delay=RETRY_BASE_SECONDS, opener=None):
     if isinstance(attempts, bool) or not isinstance(attempts, int) or attempts < 1:
         raise ValueError('attempts must be a positive integer')
-    if isinstance(timeout, bool) or timeout <= 0:
+    if (isinstance(timeout, bool) or not isinstance(timeout, (int, float))
+            or not math.isfinite(timeout) or timeout <= 0):
         raise ValueError('timeout must be positive')
+    if (isinstance(retry_delay, bool) or not isinstance(retry_delay, (int, float))
+            or not math.isfinite(retry_delay)):
+        raise ValueError('retry_delay must be a finite number')
     if opener is None:
         opener = urllib.request.build_opener(_NoRedirectHandler())
     req = urllib.request.Request(
