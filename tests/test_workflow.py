@@ -869,6 +869,226 @@ class Hardening(unittest.TestCase):
             self.assertNotEqual(p.returncode, 0)
             self.assertIn('aapt2 missing', p.stderr)
 
+            bad_dex = root / 'bad-dex.apk'
+            with zipfile.ZipFile(bad_dex, 'w') as zf:
+                zf.writestr('AndroidManifest.xml', b'manifest')
+                zf.writestr('assets/nested.dex', b'dex')
+                zf.writestr('lib/arm64-v8a/libchrome.so', b'elf')
+            p = subprocess.run([sys.executable, '-c', script, str(bad_dex), str(lock), str(aapt2), str(meta)],
+                               env=dict(os.environ, FAKE_BADGING=good), capture_output=True, text=True)
+            self.assertNotEqual(p.returncode, 0)
+            self.assertIn('classes.dex', p.stderr)
+
+            bad_so = root / 'bad-so.apk'
+            with zipfile.ZipFile(bad_so, 'w') as zf:
+                zf.writestr('AndroidManifest.xml', b'manifest')
+                zf.writestr('classes.dex', b'dex')
+                zf.writestr('lib/arm64-v8a/nested/libchrome.so', b'elf')
+            p = subprocess.run([sys.executable, '-c', script, str(bad_so), str(lock), str(aapt2), str(meta)],
+                               env=dict(os.environ, FAKE_BADGING=good), capture_output=True, text=True)
+            self.assertNotEqual(p.returncode, 0)
+            self.assertIn('native library', p.stderr)
+
+            summary_script = re.search(r"<<'SUMMARY_PY'\n(.*?)\nSUMMARY_PY\n", release_sh, re.S)[1]
+            rel_dir = root / 'release'
+            (rel_dir / 'metadata').mkdir(parents=True)
+            (rel_dir / 'Chromium-Stable-arm64.apk').write_bytes(b'apk')
+            (rel_dir / 'metadata/build-lock.json').write_text(json.dumps({
+                'version': '158.0.8127.36', 'chromium_revision': 'a' * 40}))
+            (rel_dir / 'SHA256SUMS').write_text(f"{'b' * 64}  Chromium-Stable-arm64.apk\n")
+            p = subprocess.run([sys.executable, '-c', summary_script, str(rel_dir), str(meta), str(rel_dir)],
+                               capture_output=True, text=True)
+            self.assertEqual(p.returncode, 0, p.stderr)
+            self.assertIn('::warning::Failed to append APK summary:', p.stderr)
+
+    def test_checkpoint_toctou_short_writes_and_cleanup(self):
+        from unittest import mock
+
+        class _ShortWriter:
+            def __init__(self):
+                self.buf = bytearray()
+
+            def write(self, data):
+                chunk = bytes(data[:2])
+                self.buf.extend(chunk)
+                return len(chunk)
+
+            def flush(self):
+                pass
+
+        with tempfile.TemporaryDirectory() as tmp:
+            dest = Path(tmp)
+            sha, _, _ = checkpoint.pack_stream(dest, io.BytesIO(b'abcdefghij'), chunk_size=4)
+            out = _ShortWriter()
+            self.assertEqual(checkpoint.restore_stream(dest, sha, out), (3, 10))
+            self.assertEqual(bytes(out.buf), b'abcdefghij')
+
+            # Replace part 0 on disk AFTER _verify_and_open opens it; streaming must use the verified fd.
+            sha, _, _ = checkpoint.pack_stream(dest, io.BytesIO(b'12345678'), chunk_size=4)
+            orig_verify = checkpoint._verify_and_open
+
+            def swap_after_open(path, entry):
+                f = orig_verify(path, entry)
+                if path.name == 'tree.part-00000':
+                    path.unlink()
+                    path.write_bytes(b'EVIL')
+                return f
+
+            out = io.BytesIO()
+            with mock.patch.object(checkpoint, '_verify_and_open', side_effect=swap_after_open):
+                self.assertEqual(checkpoint.restore_stream(dest, sha, out), (2, 8))
+            self.assertEqual(out.getvalue(), b'12345678')
+
+            # Failed manifest write must clean up the partial manifest as well as all parts.
+            def fail_on_manifest(stream, data):
+                if b'tree.part-' in bytes(data):
+                    raise OSError('ENOSPC')
+                stream.write(data)
+
+            with mock.patch.object(checkpoint, '_write_all', side_effect=fail_on_manifest):
+                with self.assertRaises(OSError):
+                    checkpoint.pack_stream(dest, io.BytesIO(b'abcd'), chunk_size=4)
+            self.assertEqual(list(dest.iterdir()), [])
+
+            # Existing file must be rejected by exclusive open.
+            existing = dest / 'existing'
+            existing.write_bytes(b'x')
+            with self.assertRaises(FileExistsError):
+                checkpoint._open_exclusive_wo(existing)
+
+    def test_supervisor_lingering_ninja_and_budget_guards(self):
+        from unittest import mock
+
+        class _StuckNinja:
+            pid = 77777
+
+            def __init__(self):
+                self.waits = 0
+                self.polls = 0
+
+            def wait(self, timeout=None):
+                self.waits += 1
+                if self.waits == 1:
+                    return 0
+                raise AssertionError('blocking wait() called while ninja pid is lingering')
+
+            def poll(self):
+                self.polls += 1
+                return None
+
+        stuck = _StuckNinja()
+        with mock.patch.object(build.subprocess, 'Popen', return_value=stuck), \
+             mock.patch.object(build.os, 'killpg'), \
+             mock.patch.object(build, 'kill_session', return_value=[77777]):
+            self.assertEqual(build.supervise(['fake'], 5, 1), 'failed:lingering-processes(77777)')
+        self.assertGreaterEqual(stuck.polls, 1)
+
+        sup = Supervisor()
+        p, files = sup.run_main('exit 0', started_minutes_ago=-10)
+        self.assertNotEqual(p.returncode, 0)
+        self.assertIn('Invalid future job start timestamp', p.stderr)
+        self.assertIn('Invalid future job start timestamp', files['summary'])
+
+        with tempfile.TemporaryDirectory() as tmp:
+            t = Path(tmp)
+            (t / 'chromium-job-start').write_text(str(int(build.monotonic_now())))
+            p = subprocess.run([sys.executable, str(ROOT / '.github/scripts/build.py')],
+                               env=dict(os.environ, CR_ROOT=str(t), RUNNER_TEMP=str(t),
+                                        STAGE='03', FINAL_STAGE='yes'),
+                               capture_output=True, text=True)
+            self.assertNotEqual(p.returncode, 0)
+            self.assertIn('Invalid FINAL_STAGE', p.stderr)
+
+    def test_resolve_rejects_negative_delay_and_non_https_url(self):
+        for kwargs in (dict(retry_delay=-0.1), dict(url='http://chromiumdash.appspot.com/x'),
+                       dict(url='file:///etc/passwd'), dict(url='https://')):
+            with self.assertRaises(ValueError, msg=str(kwargs)):
+                resolve.fetch_release_json(**kwargs, opener=_FakeOpener([]))
+
+    def test_common_sh_aborts_retry_when_shell_receives_sigint(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            p = subprocess.run(
+                ['bash', '-c',
+                 'source "$1/common.sh"; '
+                 'child() { python3 -c "import os,signal,sys,time;'
+                 'signal.signal(signal.SIGINT, lambda *a: sys.exit(1));'
+                 'os.kill(0, signal.SIGINT); time.sleep(5)"; }; '
+                 'retry child',
+                 '_', str(ROOT / '.github/scripts')],
+                env=dict(os.environ, RUNNER_TEMP=tmp, CR_RETRY_DELAY='0'),
+                capture_output=True, text=True, cwd=tmp, start_new_session=True)
+            self.assertEqual(p.returncode, 130)
+            self.assertNotIn('::warning::', p.stderr)
+
+    def test_restore_sh_validation_and_policy_checks(self):
+        restore_sh = (ROOT / '.github/scripts/restore.sh').read_text()
+        script = re.search(r'"\$CR_PYTHON" - <<\'PY\'\n(.*?)\nPY\n', restore_sh, re.S)[1]
+        depot_sha = (ROOT / 'config/depot_tools_revision.txt').read_text().strip()
+
+        with tempfile.TemporaryDirectory() as tmp:
+            cr = Path(tmp) / 'root'
+            (cr / 'metadata').mkdir(parents=True)
+            (cr / 'src/chrome').mkdir(parents=True)
+            (cr / 'src/out/Release').mkdir(parents=True)
+            (cr / 'src/third_party/ninja').mkdir(parents=True)
+            (cr / 'depot_tools').mkdir(parents=True)
+            for repo in (cr / 'src', cr / 'depot_tools'):
+                subprocess.run(['git', 'init', '-q', str(repo)], check=True)
+                subprocess.run(['git', '-C', str(repo), '-c', 'user.name=t', '-c', 'user.email=t@t',
+                                'commit', '-q', '--allow-empty', '-m', 'init'], check=True)
+            src_sha = subprocess.check_output(['git', '-C', str(cr / 'src'), 'rev-parse', 'HEAD'], text=True).strip()
+            dep_head = subprocess.check_output(['git', '-C', str(cr / 'depot_tools'), 'rev-parse', 'HEAD'], text=True).strip()
+            ws = Path(tmp) / 'ws'
+            (ws / 'config').mkdir(parents=True)
+            (ws / 'config/depot_tools_revision.txt').write_text(dep_head + '\n')
+            (ws / 'config/args.gn').write_bytes(b'is_debug = false\n')
+            (cr / 'src/out/Release/args.gn').write_bytes(b'is_debug = false\n')
+            (cr / 'src/out/Release/build.ninja').write_text('')
+            ninja = cr / 'src/third_party/ninja/ninja'
+            ninja.write_text('#!/bin/sh\n')
+            ninja.chmod(0o755)
+            (cr / 'src/chrome/VERSION').write_text(' MAJOR = 158 \nMINOR=0\nBUILD=8127\nPATCH=36\n')
+            lock = {
+                'repository': 'o/r', 'run_id': '1', 'workflow_sha': 'c' * 40,
+                'target': 'chrome_public_apk', 'architecture': 'arm64',
+                'source': 'https://chromium.googlesource.com/chromium/src.git',
+                'chromium_revision': src_sha, 'depot_tools_revision': dep_head,
+                'version': '158.0.8127.36',
+            }
+            (cr / 'metadata/build-lock.json').write_text(json.dumps(lock))
+            env = dict(os.environ, CR_ROOT=str(cr), GITHUB_WORKSPACE=str(ws),
+                       GITHUB_REPOSITORY='o/r', GITHUB_RUN_ID='1', GITHUB_SHA='c' * 40)
+            p = subprocess.run([sys.executable, '-c', script], env=env, capture_output=True, text=True)
+            self.assertEqual(p.returncode, 0, p.stderr)
+
+            (cr / 'src/chrome/VERSION').write_text('MAJOR=158\nMINOR=0\nBUILD=8127\n')
+            p = subprocess.run([sys.executable, '-c', script], env=env, capture_output=True, text=True)
+            self.assertNotEqual(p.returncode, 0)
+            self.assertIn('missing field: PATCH', p.stderr)
+
+            (cr / 'src/chrome/VERSION').write_text('MAJOR=158\nMINOR=0\nBUILD=8127\nPATCH=36\n')
+            (cr / 'metadata/build-lock.json').write_text(json.dumps({**lock, 'source': 'https://evil.example/src.git'}))
+            p = subprocess.run([sys.executable, '-c', script], env=env, capture_output=True, text=True)
+            self.assertNotEqual(p.returncode, 0)
+            self.assertIn('source/target/architecture mismatch', p.stderr)
+
+        self.assertIn("'generate_location_tags': False", (ROOT / '.github/scripts/fetch.sh').read_text())
+        self.assertIn('trap reap_cleanup EXIT', (ROOT / '.github/scripts/host.sh').read_text())
+        self.assertEqual(len(depot_sha), 40)
+
+    def test_result_verdict_empty_status_and_anomalies(self):
+        rv = ResultVerdict()
+        ok, summary = rv.verdict(prepare=('failure', ''))
+        self.assertFalse(ok)
+        self.assertIn('| `prepare` | `failure` | `-` |', summary)
+        self.assertNotIn('| `` |', summary)
+
+        ok, _ = rv.verdict(prepare=('unknown', 'running'), part_01=('success', 'completed'))
+        self.assertFalse(ok)
+
+        ok, _ = rv.verdict(prepare=('success', 'completed'), part_01=('success', 'completed'))
+        self.assertFalse(ok)
+
 
 if __name__ == '__main__':
     unittest.main()
