@@ -48,12 +48,28 @@ def parts(directory):
     return [root / part_name(n) for n in range(count)]
 
 
+def _open_regular_ro(path):
+    flags = os.O_RDONLY | getattr(os, 'O_NOFOLLOW', 0)
+    try:
+        fd = os.open(path, flags)
+    except OSError as exc:
+        raise ValueError(BAD_LAYOUT) from exc
+    try:
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode):
+            raise ValueError(BAD_LAYOUT)
+        return os.fdopen(fd, 'rb')
+    except BaseException:
+        os.close(fd)
+        raise
+
+
 def sha256_file(path):
     h = hashlib.sha256()
     buf = bytearray(IO_BUFFER)
     view = memoryview(buf)
     size = 0
-    with path.open('rb') as f:
+    with _open_regular_ro(path) as f:
         while True:
             n = f.readinto(buf)
             if not n:
@@ -64,7 +80,7 @@ def sha256_file(path):
 
 
 def _manifest_bytes(directory):
-    with (Path(directory) / MANIFEST).open('rb') as f:
+    with _open_regular_ro(Path(directory) / MANIFEST) as f:
         raw = f.read(MAX_MANIFEST_BYTES + 1)
     if len(raw) > MAX_MANIFEST_BYTES:
         raise ValueError(BAD_LAYOUT)
@@ -110,7 +126,7 @@ def digest(directory):
 
 
 def pack_stream(directory, in_stream, chunk_size=CHUNK_SIZE):
-    if chunk_size <= 0:
+    if isinstance(chunk_size, bool) or not isinstance(chunk_size, int) or chunk_size <= 0:
         raise ValueError('chunk_size must be positive')
     dest = Path(directory)
     if not dest.is_dir():
@@ -121,6 +137,7 @@ def pack_stream(directory, in_stream, chunk_size=CHUNK_SIZE):
     buf = bytearray(min(IO_BUFFER, chunk_size))
     view = memoryview(buf)
     lines = []
+    created = []
     total_bytes = 0
     out = h = name = None
     written = 0
@@ -135,7 +152,9 @@ def pack_stream(directory, in_stream, chunk_size=CHUNK_SIZE):
                 if len(lines) >= MAX_PARTS:
                     raise ValueError('Checkpoint exceeded maximum part count')
                 name = part_name(len(lines))
-                out = (dest / name).open('wb')
+                part_path = dest / name
+                out = part_path.open('wb')
+                created.append(part_path)
                 h = hashlib.sha256()
                 written = 0
             chunk = read_slice[:n]
@@ -151,14 +170,21 @@ def pack_stream(directory, in_stream, chunk_size=CHUNK_SIZE):
             out.close()
             out = None
             lines.append(f'{h.hexdigest()} {written} {name}\n')
-    finally:
+        if total_bytes == 0:
+            raise ValueError('Empty checkpoint stream')
+        data = ''.join(lines).encode('ascii')
+        manifest_path = dest / MANIFEST
+        manifest_path.write_bytes(data)
+        created.append(manifest_path)
+    except BaseException:
         if out is not None:
             out.close()
-
-    if total_bytes == 0:
-        raise ValueError('Empty checkpoint stream')
-    data = ''.join(lines).encode('ascii')
-    (dest / MANIFEST).write_bytes(data)
+        for path in created:
+            try:
+                path.unlink()
+            except OSError:
+                pass
+        raise
     return hashlib.sha256(data).hexdigest(), len(lines), total_bytes
 
 
@@ -174,17 +200,21 @@ def restore_stream(directory, expected, out_stream):
     # disk read overlaps extraction and the part is streamed from the page cache.
     with ThreadPoolExecutor(max_workers=1) as pool:
         check = pool.submit(verify_part, *entries[0])
-        for n, (path, _) in enumerate(entries):
+        for n, (path, (_, expected_size)) in enumerate(entries):
             check.result()
             if n + 1 < len(entries):
                 check = pool.submit(verify_part, *entries[n + 1])
-            with path.open('rb') as f:
+            part_bytes = 0
+            with _open_regular_ro(path) as f:
                 while True:
                     size = f.readinto(buf)
                     if not size:
                         break
                     out_stream.write(view[:size])
-                    total_bytes += size
+                    part_bytes += size
+            if part_bytes != expected_size:
+                raise ValueError(MISMATCH)
+            total_bytes += part_bytes
             out_stream.flush()
             path.unlink()
     (Path(directory) / MANIFEST).unlink()
