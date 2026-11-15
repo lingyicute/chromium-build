@@ -32,11 +32,18 @@ fail() { echo "::error::$*" >&2; exit 1; }
 # Re-run an idempotent network step against the SAME official source and
 # revision; never falls back to another mirror, branch, or version.
 retry() {
-  local attempt
+  (( $# > 0 )) || fail 'retry requires a command'
+  local delay="${CR_RETRY_DELAY:-30}"
+  [[ "$delay" =~ ^[0-9]+$ ]] || fail "Invalid CR_RETRY_DELAY: $delay"
+  local attempt rc
   for attempt in 1 2 3; do
-    "$@" && return 0
-    (( attempt < 3 )) || fail "Failed after 3 attempts: $*"
-    echo "::warning::Attempt $attempt failed, retrying: $*" >&2
-    sleep $(( attempt * ${CR_RETRY_DELAY:-30} ))
+    rc=0
+    "$@" && return 0 || rc=$?
+    if (( rc == 130 || rc == 143 )); then
+      fail "Interrupted (exit $rc), aborting without retry: $*"
+    fi
+    (( attempt < 3 )) || fail "Failed after 3 attempts: $* (exit $rc)"
+    echo "::warning::Attempt $attempt failed (exit $rc), retrying: $*" >&2
+    sleep $(( attempt * delay ))
   done
 }
