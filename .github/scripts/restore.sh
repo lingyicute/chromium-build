@@ -11,16 +11,22 @@ from pathlib import Path
 root = Path(os.environ['CR_ROOT'])
 lock = json.loads((root / 'metadata/build-lock.json').read_text())
 for field, env in [('repository', 'GITHUB_REPOSITORY'), ('run_id', 'GITHUB_RUN_ID'), ('workflow_sha', 'GITHUB_SHA')]:
-    if lock[field] != os.environ[env]:
+    if lock.get(field) != os.environ[env]:
         raise SystemExit(f'Checkpoint {field} is from another run/repository/commit')
+if lock.get('target') != 'chrome_public_apk' or lock.get('architecture') != 'arm64':
+    raise SystemExit('Checkpoint target/architecture mismatch')
 workspace = Path(os.environ['GITHUB_WORKSPACE'])
 expected_depot = (workspace / 'config/depot_tools_revision.txt').read_text().strip()
-if lock['depot_tools_revision'] != expected_depot:
+if lock.get('depot_tools_revision') != expected_depot:
     raise SystemExit('depot_tools pin changed')
 for directory, field in [('src', 'chromium_revision'), ('depot_tools', 'depot_tools_revision')]:
     sha = subprocess.check_output(['git', '-C', str(root / directory), 'rev-parse', 'HEAD'], text=True).strip()
-    if sha != lock[field]:
+    if sha != lock.get(field):
         raise SystemExit(f'{directory} revision mismatch')
+parts = dict(line.split('=', 1) for line in (root / 'src/chrome/VERSION').read_text().splitlines() if '=' in line)
+actual_version = '.'.join(parts[k].strip() for k in ('MAJOR', 'MINOR', 'BUILD', 'PATCH'))
+if actual_version != lock.get('version'):
+    raise SystemExit(f'Restored chrome/VERSION mismatch: {actual_version} != {lock.get("version")}')
 if (root / 'src/out/Release/args.gn').read_bytes() != (workspace / 'config/args.gn').read_bytes():
     raise SystemExit('GN arguments changed')
 if not (root / 'src/out/Release/build.ninja').is_file():
