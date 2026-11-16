@@ -24,6 +24,11 @@ MAX_RETRY_AFTER_SECONDS = 60.0
 
 class _NoRedirectHandler(urllib.request.HTTPRedirectHandler):
     def redirect_request(self, req, fp, code, msg, headers, newurl):
+        if fp is not None:
+            try:
+                fp.close()
+            except Exception:
+                pass
         raise ValueError(f'Unexpected ChromiumDash redirect ({code}): {newurl}')
 
 
