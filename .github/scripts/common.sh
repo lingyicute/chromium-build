@@ -47,7 +47,7 @@ fail() { echo "::error::$*" >&2; exit 1; }
 retry() {
   (( $# > 0 )) || fail 'retry requires a command'
   local delay="${CR_RETRY_DELAY:-30}"
-  [[ "$delay" =~ ^[0-9]+$ ]] || fail "Invalid CR_RETRY_DELAY: $delay"
+  { [[ "$delay" =~ ^[0-9]{1,4}$ ]] && (( 10#$delay <= 3600 )); } || fail "Invalid CR_RETRY_DELAY: $delay"
   local attempt rc interrupted=0 prev_int prev_term
   prev_int=$(trap -p INT)
   prev_term=$(trap -p TERM)
