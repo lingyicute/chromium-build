@@ -264,6 +264,8 @@ def restore_stream(directory, expected, out_stream):
                         size = f.readinto(buf)
                         if not size:
                             break
+                        if part_bytes + size > expected_size:
+                            raise ValueError(MISMATCH)
                         _write_all(out_stream, view[:size])
                         part_bytes += size
                 if part_bytes != expected_size:
