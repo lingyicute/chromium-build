@@ -4,8 +4,12 @@ source "$(dirname "$0")/common.sh"
 export PATH="/usr/bin:/bin:/usr/sbin:/sbin"
 [[ "$CR_ROOT" == /mnt/chromium-relay && "$CR_TRANSFER" == /mnt/chromium-transfer ]] \
   || fail 'Refusing destructive export outside the fixed /mnt checkpoint paths'
+[[ -d "$CR_ROOT" && ! -L "$CR_ROOT" ]] || fail 'Build root must be a real directory'
 mkdir -p "$CR_TRANSFER/checkpoint"
-[[ -z "$(ls -A "$CR_TRANSFER/checkpoint")" ]] || fail 'Checkpoint output must be empty'
+[[ -d "$CR_TRANSFER/checkpoint" && ! -L "$CR_TRANSFER/checkpoint" ]] \
+  || fail 'Checkpoint output must be a real directory'
+checkpoint_entries=$(ls -A -- "$CR_TRANSFER/checkpoint")
+[[ -z "$checkpoint_entries" ]] || fail 'Checkpoint output must be empty'
 # IMPORTANT: destructive export on a disposable VM. No commands may use the
 # source tree afterwards. Each source file is removed after tar reads it, so a
 # full uncompressed tree + a full archive need not fit simultaneously.
@@ -31,6 +35,7 @@ hash=$(
     | "$CR_PYTHON" "$GITHUB_WORKSPACE/.github/scripts/checkpoint.py" pack-stream "$CR_TRANSFER/checkpoint"
 )
 [[ "$hash" =~ ^[0-9a-f]{64}$ ]] || fail 'Invalid checkpoint SHA-256 output'
-[[ -z "$(ls -A "$CR_ROOT")" ]] || fail 'Destructive export left files behind in build root'
-echo "sha256=$hash" >> "$GITHUB_OUTPUT"
+leftover_entries=$(ls -A -- "$CR_ROOT")
+[[ -z "$leftover_entries" ]] || fail 'Destructive export left files behind in build root'
+echo "sha256=$hash" >> "${GITHUB_OUTPUT:?}"
 du -sh "$CR_TRANSFER/checkpoint"
