@@ -27,6 +27,9 @@ def monotonic_now():
     return time.monotonic()
 
 
+DEAD_PROC_STATES = frozenset({'Z', 'X', 'x'})
+
+
 def compute_jobs(cpu_count=None, mem_kib=None):
     if cpu_count is None:
         cpu_count = os.cpu_count() or 1
@@ -42,16 +45,39 @@ def compute_budget(started, now, final_stage=False):
     return started + deadline - now
 
 
-def _live_session_pids(sid):
+def _has_live_thread(proc_dir):
+    try:
+        tids = os.listdir(proc_dir / 'task')
+    except OSError:
+        return False
+    for tid in tids:
+        if not tid.isdigit():
+            continue
+        try:
+            tstat = (proc_dir / 'task' / tid / 'stat').read_text(encoding='utf-8')
+            tfields = tstat[tstat.rindex(')') + 2:].split()
+            if tfields[0] not in DEAD_PROC_STATES:
+                return True
+        except (OSError, ValueError, IndexError):
+            pass
+    return False
+
+
+def _live_session_pids(sid, proc_root='/proc'):
     pids = []
-    for entry in os.listdir('/proc'):
+    for entry in os.listdir(proc_root):
         if not entry.isdigit():
             continue
         try:
-            stat = Path('/proc', entry, 'stat').read_text()
-            # Fields after the ")" closing comm: state ppid pgrp session ...
+            proc_dir = Path(proc_root, entry)
+            stat = (proc_dir / 'stat').read_text(encoding='utf-8')
+            # Fields after the ")" closing comm: state ppid pgrp session ... num_threads(17)
             fields = stat[stat.rindex(')') + 2:].split()
-            if fields[0] not in ('Z', 'X', 'x') and int(fields[3]) == sid:
+            if int(fields[3]) != sid:
+                continue
+            if fields[0] not in DEAD_PROC_STATES:
+                pids.append(int(entry))
+            elif fields[0] == 'Z' and len(fields) > 17 and int(fields[17]) > 1 and _has_live_thread(proc_dir):
                 pids.append(int(entry))
         except (OSError, ValueError, IndexError):
             pass
@@ -117,11 +143,14 @@ def supervise(command, seconds, grace=180, env=None):
                 os.killpg(p.pid, signal.SIGKILL)
             except (ProcessLookupError, PermissionError):
                 pass
-        lingering = kill_session(p.pid)
+        lingering = list(kill_session(p.pid))
         if p.pid in lingering:
             p.poll()
         else:
-            p.wait()
+            try:
+                p.wait(timeout=1.0)
+            except subprocess.TimeoutExpired:
+                lingering.append(p.pid)
     if lingering and not result.startswith('failed:'):
         return f'failed:lingering-processes({",".join(map(str, lingering))})'
     return result
