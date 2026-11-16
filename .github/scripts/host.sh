@@ -10,8 +10,10 @@ for cmd in sudo git tar zstd sha256sum timeout fallocate mkswap swapon swapoff \
   command -v "$cmd" >/dev/null || { echo "Missing runner tool: $cmd; refusing apt/pip fallback" >&2; exit 1; }
 done
 [[ "$(uname -m)" == x86_64 ]] || { echo "Unsupported architecture: $(uname -m) (need x86_64)" >&2; exit 1; }
+[[ -r /etc/os-release ]] || { echo 'Missing /etc/os-release' >&2; exit 1; }
 . /etc/os-release
-[[ "$ID" == ubuntu && "$VERSION_ID" == 24.04 ]] || { echo "Unsupported image: $ID $VERSION_ID (need ubuntu 24.04)" >&2; exit 1; }
+[[ "${ID:-}" == ubuntu && "${VERSION_ID:-}" == 24.04 ]] \
+  || { echo "Unsupported image: ${ID:-unknown} ${VERSION_ID:-unknown} (need ubuntu 24.04)" >&2; exit 1; }
 mkdir -p "${RUNNER_TEMP:?}/chromium-logs"
 [[ -x /usr/bin/python3 ]] || { echo 'Missing /usr/bin/python3; refusing apt/pip fallback' >&2; exit 1; }
 # Record monotonic boot time so NTP wall-clock adjustments cannot skew stage budgets.
