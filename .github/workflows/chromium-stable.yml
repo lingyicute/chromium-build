@@ -107,29 +107,45 @@ jobs:
         run: |
           /usr/bin/python3 - <<'PY'
           import json, os
-          needs = json.loads(os.environ['NEEDS_JSON'])
+          raw_needs = json.loads(os.environ['NEEDS_JSON'])
+          needs = raw_needs if isinstance(raw_needs, dict) else {}
           order = ['prepare'] + [f'part-{i:02d}' for i in range(1, 9)]
+          def stage_job(name):
+              job = needs.get(name)
+              return job if isinstance(job, dict) else {}
+          def stage_result(name):
+              res = stage_job(name).get('result')
+              return res if isinstance(res, str) and res else 'unknown'
           def stage_status(name):
-              return ((needs.get(name, {}).get('outputs') or {}).get('status') or '')
-          errors = [name for name in order if needs.get(name, {}).get('result') in ('failure', 'cancelled')]
+              outputs = stage_job(name).get('outputs')
+              status = outputs.get('status') if isinstance(outputs, dict) else ''
+              return status if isinstance(status, str) else ''
+          errors = [name for name in order if stage_result(name) in ('failure', 'cancelled')]
           completed = [name for name in order if stage_status(name) == 'completed']
           exhausted = any(stage_status(name) == 'exhausted' for name in order)
-          all_clean = all(needs.get(name, {}).get('result') in ('success', 'skipped') for name in order)
-          ok = len(completed) == 1 and all_clean and needs.get(completed[0], {}).get('result') == 'success'
+          if len(completed) == 1:
+              idx = order.index(completed[0])
+              ok = (stage_result(completed[0]) == 'success'
+                    and all(stage_result(n) == 'success' and stage_status(n) == 'running' for n in order[:idx])
+                    and all(stage_result(n) == 'skipped' and stage_status(n) == '' for n in order[idx + 1:]))
+          else:
+              ok = False
 
           if ok:
-              reason = f'APK completed in `{completed[-1]}`; see the `apk-*` artifact.'
-          elif needs.get('prepare', {}).get('result') == 'skipped':
+              reason = f'APK completed in `{completed[0]}`; see the `apk-*` artifact.'
+          elif stage_result('prepare') == 'skipped':
               reason = 'FAILED: `prepare` was skipped (workflow may only run from the default branch).'
-          elif completed:
-              reason = (f'FAILED: `{completed[-1]}` built the APK, but verifying or uploading it failed; '
+          elif len(completed) > 1:
+              reason = 'FAILED: multiple stages reported `completed`: ' + ', '.join(completed) + '.'
+          elif len(completed) == 1 and stage_result(completed[0]) != 'success':
+              reason = (f'FAILED: `{completed[0]}` built the APK, but verifying or uploading it failed; '
                         'an `unverified-apk-*` artifact may remain, for inspection only.')
           elif errors:
               reason = 'FAILED: required stage(s) failed or were cancelled: ' + ', '.join(errors) + '.'
-          elif exhausted or needs.get('part-08', {}).get('result') == 'success':
+          elif exhausted or stage_result('part-08') == 'success':
               reason = 'FAILED: prepare and all 8 build stages ran without finishing; stage budget was exhausted.'
           else:
-              reason = 'FAILED: no stage produced a completed APK. Inspect stage logs.'
+              reason = 'FAILED: no stage produced a validly completed APK. Inspect stage logs.'
 
           summary = os.environ.get('GITHUB_STEP_SUMMARY')
           if summary:
@@ -138,8 +154,7 @@ jobs:
                   f.write(reason + '\n\n')
                   f.write('| Stage | Result | Output status |\n|---|---|---|\n')
                   for name in order:
-                      job = needs.get(name, {})
-                      f.write(f"| `{name}` | `{job.get('result', 'unknown')}` | `{stage_status(name) or '-'}` |\n")
+                      f.write(f"| `{name}` | `{stage_result(name)}` | `{stage_status(name) or '-'}` |\n")
                   f.write('\nDevelopment signing key only. Not a production release.\n')
           if not ok:
               raise SystemExit(reason)
