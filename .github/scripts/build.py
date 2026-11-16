@@ -3,6 +3,7 @@
 import json
 import os
 from pathlib import Path
+import re
 import signal
 import subprocess
 import time
@@ -198,16 +199,25 @@ def main():
 
     signal.signal(signal.SIGTERM, _handle_sigterm)
 
-    root = Path(os.environ['CR_ROOT'])
-    started = int((Path(os.environ['RUNNER_TEMP']) / 'chromium-job-start').read_text().strip())
+    stage = os.environ.get('STAGE', '')
+    if not re.fullmatch(r'0[0-8]', stage):
+        raise SystemExit(f'Invalid STAGE: {stage!r}')
     final_raw = os.environ.get('FINAL_STAGE', 'false')
-    if final_raw not in ('true', 'false'):
+    if final_raw not in ('true', 'false') or (stage == '00' and final_raw == 'true'):
         raise SystemExit(f'Invalid FINAL_STAGE: {final_raw!r}')
     final_stage = final_raw == 'true'
+
+    root = Path(os.environ['CR_ROOT'])
+    raw_started = (Path(os.environ['RUNNER_TEMP']) / 'chromium-job-start').read_text(encoding='utf-8').strip()
+    if not re.fullmatch(r'-?[0-9]+', raw_started):
+        msg = f'Invalid job start timestamp: {raw_started!r}'
+        summarize(f'- Stage {stage}: `failed` before compiling; {msg}.')
+        raise SystemExit(msg)
+    started = int(raw_started)
     now = monotonic_now()
     if started > now:
         msg = f'Invalid future job start timestamp ({started} > {now:.1f})'
-        summarize(f"- Stage {os.environ['STAGE']}: `failed` before compiling; {msg}.")
+        summarize(f'- Stage {stage}: `failed` before compiling; {msg}.')
         raise SystemExit(msg)
     remaining = compute_budget(started, now, final_stage=final_stage)
     setup = round(now - started, 1)
@@ -215,7 +225,7 @@ def main():
         msg = (f'Fetch/restore exhausted the time budget '
                f'(setup {setup / 60:.1f} min, remaining {remaining / 60:.1f} min); '
                f'refusing a no-progress checkpoint')
-        summarize(f"- Stage {os.environ['STAGE']}: `failed` before compiling; {msg}.")
+        summarize(f'- Stage {stage}: `failed` before compiling; {msg}.')
         raise SystemExit(msg)
     jobs = compute_jobs()
     os.chdir(root / 'src')
