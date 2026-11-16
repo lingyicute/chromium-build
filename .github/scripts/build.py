@@ -192,6 +192,8 @@ def free_gib(path):
 
 def main():
     def _handle_sigterm(signum, frame):
+        # Ignore repeated SIGTERM so supervise()'s finally finishes reaping the session.
+        signal.signal(signal.SIGTERM, signal.SIG_IGN)
         raise SystemExit(f'Build supervisor terminated by signal {signum}')
 
     signal.signal(signal.SIGTERM, _handle_sigterm)
