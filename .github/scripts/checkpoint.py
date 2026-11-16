@@ -28,9 +28,20 @@ def part_name(n):
     return f'tree.part-{n:05d}'
 
 
+def _require_real_dir(directory, message):
+    root = Path(directory)
+    try:
+        st = root.lstat()
+    except OSError as exc:
+        raise ValueError(message) from exc
+    if not stat.S_ISDIR(st.st_mode):
+        raise ValueError(message)
+    return root
+
+
 def parts(directory):
     """Part paths of a directory holding exactly the manifest and contiguous parts."""
-    root = Path(directory)
+    root = _require_real_dir(directory, 'Checkpoint directory unreadable')
     try:
         names = sorted(p.name for p in root.iterdir())
     except OSError as exc:
@@ -80,7 +91,8 @@ def sha256_file(path):
 
 
 def _manifest_bytes(directory):
-    with _open_regular_ro(Path(directory) / MANIFEST) as f:
+    root = _require_real_dir(directory, BAD_LAYOUT)
+    with _open_regular_ro(root / MANIFEST) as f:
         raw = f.read(MAX_MANIFEST_BYTES + 1)
     if len(raw) > MAX_MANIFEST_BYTES:
         raise ValueError(BAD_LAYOUT)
@@ -175,9 +187,7 @@ def _write_all(stream, data):
 def pack_stream(directory, in_stream, chunk_size=CHUNK_SIZE):
     if isinstance(chunk_size, bool) or not isinstance(chunk_size, int) or chunk_size <= 0:
         raise ValueError('chunk_size must be positive')
-    dest = Path(directory)
-    if not dest.is_dir():
-        raise ValueError('Checkpoint output directory does not exist')
+    dest = _require_real_dir(directory, 'Checkpoint output directory does not exist')
     if any(dest.iterdir()):
         raise ValueError('Checkpoint output must be empty')
 
