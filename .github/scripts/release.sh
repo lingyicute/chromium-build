@@ -80,50 +80,57 @@ PY
 cp "$apk" "$release/Chromium-Stable-arm64.apk"
 cp -a "$CR_ROOT/metadata" "$release/metadata"
 # SHA256SUMS authenticates nothing on its own; it detects corruption only.
-(cd "$release" && find . -type f ! -name SHA256SUMS -printf '%P\0' | sort -z | xargs -0 sha256sum -- > SHA256SUMS)
+(cd "$release" && find . -type f ! -name SHA256SUMS -printf '%P\0' | sort -z | xargs -0r sha256sum -- > SHA256SUMS)
+[[ -s "$release/SHA256SUMS" ]] || fail 'Failed to generate SHA256SUMS'
 if [[ -n "${GITHUB_STEP_SUMMARY:-}" ]]; then
 "$CR_PYTHON" - "$release" "$apk_meta" "$GITHUB_STEP_SUMMARY" <<'SUMMARY_PY'
 import json, sys
 from pathlib import Path
 
-release = Path(sys.argv[1])
-apk_meta = json.loads(Path(sys.argv[2]).read_text())
-summary_path = Path(sys.argv[3])
-lock = json.loads((release / 'metadata/build-lock.json').read_text())
-apk_path = release / 'Chromium-Stable-arm64.apk'
-apk_sha = next(
-    parts[0]
-    for line in (release / 'SHA256SUMS').read_text().splitlines()
-    for parts in (line.split('  ', 1),)
-    if len(parts) == 2 and parts[1] == 'Chromium-Stable-arm64.apk'
-)
-runners_path = release / 'metadata/runners.jsonl'
-records = [json.loads(line) for line in runners_path.read_text().splitlines() if line.strip()] if runners_path.is_file() else []
-total_minutes = sum(r.get('elapsed_seconds', 0) for r in records) / 60
-lines = [
-    '### Built Chromium Android arm64 APK',
-    f"- Version: `{lock['version']}` (`{lock['chromium_revision'][:12]}`)",
-]
-details = [
-    f"versionCode `{apk_meta['version_code']}`" if apk_meta.get('version_code') else None,
-    f"minSdk `{apk_meta['min_sdk']}`" if apk_meta.get('min_sdk') else None,
-    f"targetSdk `{apk_meta['target_sdk']}`" if apk_meta.get('target_sdk') else None,
-]
-details = [d for d in details if d]
-if apk_meta.get('package'):
-    suffix = f" ({', '.join(details)})" if details else ''
-    lines.append(f"- Package: `{apk_meta['package']}`{suffix}")
-lines.extend([
-    f"- APK size: `{apk_path.stat().st_size:,}` bytes",
-    f"- APK SHA-256: `{apk_sha}`",
-])
-if records:
-    lines.append(f"- Compile stages: `{len(records)}` ({total_minutes:.1f} min total compile)")
-lines.append('- Signing: upstream development signing key; NOT production-signed.')
+
+def clean(value):
+    return str(value).replace('`', '').replace('\r', ' ').replace('\n', ' ')
+
+
 try:
-    with summary_path.open('a') as f:
+    release = Path(sys.argv[1])
+    apk_meta = json.loads(Path(sys.argv[2]).read_text(encoding='utf-8'))
+    summary_path = Path(sys.argv[3])
+    lock = json.loads((release / 'metadata/build-lock.json').read_text(encoding='utf-8'))
+    apk_path = release / 'Chromium-Stable-arm64.apk'
+    apk_sha = next(
+        parts[0]
+        for line in (release / 'SHA256SUMS').read_text(encoding='utf-8').splitlines()
+        for parts in (line.split('  ', 1),)
+        if len(parts) == 2 and parts[1] == 'Chromium-Stable-arm64.apk'
+    )
+    runners_path = release / 'metadata/runners.jsonl'
+    records = ([json.loads(line) for line in runners_path.read_text(encoding='utf-8').splitlines() if line.strip()]
+               if runners_path.is_file() else [])
+    total_minutes = sum((r.get('elapsed_seconds') or 0) for r in records) / 60
+    lines = [
+        '### Built Chromium Android arm64 APK',
+        f"- Version: `{clean(lock['version'])}` (`{clean(lock['chromium_revision'][:12])}`)",
+    ]
+    details = [
+        f"versionCode `{clean(apk_meta['version_code'])}`" if apk_meta.get('version_code') else None,
+        f"minSdk `{clean(apk_meta['min_sdk'])}`" if apk_meta.get('min_sdk') else None,
+        f"targetSdk `{clean(apk_meta['target_sdk'])}`" if apk_meta.get('target_sdk') else None,
+    ]
+    details = [d for d in details if d]
+    if apk_meta.get('package'):
+        suffix = f" ({', '.join(details)})" if details else ''
+        lines.append(f"- Package: `{clean(apk_meta['package'])}`{suffix}")
+    lines.extend([
+        f"- APK size: `{apk_path.stat().st_size:,}` bytes",
+        f"- APK SHA-256: `{clean(apk_sha)}`",
+    ])
+    if records:
+        lines.append(f"- Compile stages: `{len(records)}` ({total_minutes:.1f} min total compile)")
+    lines.append('- Signing: upstream development signing key; NOT production-signed.')
+    with summary_path.open('a', encoding='utf-8') as f:
         f.write('\n'.join(lines) + '\n')
-except OSError as exc:
+except Exception as exc:
     print(f'::warning::Failed to append APK summary: {exc}', file=sys.stderr)
 SUMMARY_PY
 fi
