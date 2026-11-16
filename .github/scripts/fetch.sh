@@ -29,6 +29,7 @@ git -C "$CR_ROOT/src" remote add origin https://chromium.googlesource.com/chromi
 retry git -C "$CR_ROOT/src" -c fetch.fsckObjects=true fetch --no-tags --depth=1 origin "refs/tags/$version"
 [[ "$(git -C "$CR_ROOT/src" rev-parse 'FETCH_HEAD^{commit}')" == "$revision" ]] || fail 'Stable tag/ChromiumDash commit mismatch'
 git -C "$CR_ROOT/src" checkout --detach "$revision"
+[[ "$(git -C "$CR_ROOT/src" rev-parse HEAD)" == "$revision" ]] || fail 'Chromium source checkout revision mismatch'
 git init "$CR_ROOT/depot_tools"
 git -C "$CR_ROOT/depot_tools" remote add origin https://chromium.googlesource.com/chromium/tools/depot_tools.git
 retry git -C "$CR_ROOT/depot_tools" -c fetch.fsckObjects=true fetch --no-tags --depth=1 origin "$depot_revision"
@@ -59,13 +60,15 @@ retry gclient sync --nohooks --no-history --revision "src@$revision" --jobs=8
 import json, os
 from pathlib import Path
 root = Path(os.environ['CR_ROOT'])
-parts = {k.strip(): v.strip() for line in (root / 'src/chrome/VERSION').read_text().splitlines()
-         if '=' in line for k, v in (line.split('=', 1),)}
+parts = {k.strip(): v.strip()
+         for line in (root / 'src/chrome/VERSION').read_text(encoding='utf-8').splitlines()
+         if not line.lstrip().startswith('#') and '=' in line
+         for k, v in (line.split('=', 1),)}
 try:
     actual = '.'.join(parts[k] for k in ('MAJOR', 'MINOR', 'BUILD', 'PATCH'))
 except KeyError as exc:
     raise SystemExit(f'chrome/VERSION missing field: {exc.args[0]}') from exc
-expected = json.loads((root / 'metadata/build-lock.json').read_text())['version']
+expected = json.loads((root / 'metadata/build-lock.json').read_text(encoding='utf-8'))['version']
 if actual != expected:
     raise SystemExit(f'chrome/VERSION mismatch: {actual} != {expected}')
 PY
