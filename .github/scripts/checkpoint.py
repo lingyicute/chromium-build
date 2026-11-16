@@ -228,7 +228,10 @@ def pack_stream(directory, in_stream, chunk_size=CHUNK_SIZE):
         out = None
     except BaseException:
         if out is not None:
-            out.close()
+            try:
+                out.close()
+            except OSError:
+                pass
         for path in created:
             try:
                 path.unlink()
