@@ -2,14 +2,24 @@
 source "$(dirname "$0")/common.sh"
 mkdir -p "$HOME" "$CR_ROOT/cache" "$CR_ROOT/metadata" "$CIPD_CACHE_DIR"
 "$CR_PYTHON" "$GITHUB_WORKSPACE/.github/scripts/resolve.py"
-readarray -t lock < <("$CR_PYTHON" - <<'PY'
-import json, os
-with open(os.environ['CR_ROOT'] + '/metadata/build-lock.json') as f:
+lock_raw=$("$CR_PYTHON" - <<'PY'
+import json, os, re
+with open(os.environ['CR_ROOT'] + '/metadata/build-lock.json', encoding='utf-8') as f:
     x = json.load(f)
-for k in ('version', 'chromium_revision', 'depot_tools_revision'):
-    print(x[k])
+version = x['version']
+revision = x['chromium_revision']
+depot = x['depot_tools_revision']
+if not isinstance(version, str) or not re.fullmatch(r'(?:0|[1-9][0-9]{0,3})(?:\.(?:0|[1-9][0-9]{0,5})){3}', version):
+    raise SystemExit('Invalid version in build-lock.json')
+for name, sha in (('chromium_revision', revision), ('depot_tools_revision', depot)):
+    if not isinstance(sha, str) or not re.fullmatch(r'[0-9a-f]{40}', sha):
+        raise SystemExit(f'Invalid {name} in build-lock.json')
+print(version)
+print(revision)
+print(depot)
 PY
 )
+readarray -t lock <<< "$lock_raw"
 [[ "${#lock[@]}" -eq 3 && -n "${lock[0]}" && -n "${lock[1]}" && -n "${lock[2]}" ]] || fail 'Failed to read build-lock.json'
 version="${lock[0]}"; revision="${lock[1]}"; depot_revision="${lock[2]}"
 # Validate tag -> commit against the independent official source repository.
