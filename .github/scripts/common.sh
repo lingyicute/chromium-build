@@ -48,11 +48,11 @@ retry() {
   (( $# > 0 )) || fail 'retry requires a command'
   local delay="${CR_RETRY_DELAY:-30}"
   { [[ "$delay" =~ ^[0-9]{1,4}$ ]] && (( 10#$delay <= 3600 )); } || fail "Invalid CR_RETRY_DELAY: $delay"
-  local attempt rc interrupted=0 prev_int prev_term
+  local attempt rc wait_s sleep_pid=0 interrupted=0 prev_int prev_term
   prev_int=$(trap -p INT)
   prev_term=$(trap -p TERM)
-  trap 'interrupted=130' INT
-  trap 'interrupted=143' TERM
+  trap 'interrupted=130; (( sleep_pid == 0 )) || kill "$sleep_pid" 2>/dev/null || true' INT
+  trap 'interrupted=143; (( sleep_pid == 0 )) || kill "$sleep_pid" 2>/dev/null || true' TERM
   for attempt in 1 2 3; do
     rc=0
     "$@" || rc=$?
@@ -75,12 +75,24 @@ retry() {
       fail "Failed after 3 attempts: $* (exit $rc)"
     fi
     echo "::warning::Attempt $attempt failed (exit $rc), retrying: $*" >&2
-    sleep $(( attempt * 10#$delay )) || true
-    if (( interrupted != 0 )); then
+    wait_s=$(( attempt * 10#$delay ))
+    rc=0
+    if (( wait_s > 0 )); then
+      sleep "$wait_s" &
+      sleep_pid=$!
+      if (( interrupted != 0 )); then
+        kill "$sleep_pid" 2>/dev/null || true
+      fi
+      wait "$sleep_pid" || rc=$?
+      wait "$sleep_pid" 2>/dev/null || true
+      sleep_pid=0
+    fi
+    (( interrupted == 0 )) || rc=$interrupted
+    if (( rc == 130 || rc == 143 )); then
       eval "${prev_int:-trap - INT}"
       eval "${prev_term:-trap - TERM}"
-      echo "::error::Interrupted (exit $interrupted), aborting without retry: $*" >&2
-      exit "$interrupted"
+      echo "::error::Interrupted (exit $rc), aborting without retry: $*" >&2
+      exit "$rc"
     fi
   done
 }
