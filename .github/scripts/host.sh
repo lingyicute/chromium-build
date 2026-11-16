@@ -4,14 +4,16 @@ export LC_ALL=C.UTF-8 LANG=C.UTF-8 TZ=UTC
 export PATH="/usr/bin:/bin:/usr/sbin:/sbin"
 # Run ONLY on a fresh GitHub-hosted VM. Never use this cleanup on a personal host.
 [[ "${RUNNER_ENVIRONMENT:-}" == github-hosted ]] || { echo 'GitHub-hosted runner required' >&2; exit 1; }
+for cmd in sudo git tar zstd sha256sum timeout fallocate mkswap swapon swapoff \
+  free df du find sort xargs tee chmod chown nproc cp rm rmdir mkdir mktemp ls \
+  cat id uname dirname tail sleep; do
+  command -v "$cmd" >/dev/null || { echo "Missing runner tool: $cmd; refusing apt/pip fallback" >&2; exit 1; }
+done
 [[ "$(uname -m)" == x86_64 ]] || { echo "Unsupported architecture: $(uname -m) (need x86_64)" >&2; exit 1; }
 . /etc/os-release
 [[ "$ID" == ubuntu && "$VERSION_ID" == 24.04 ]] || { echo "Unsupported image: $ID $VERSION_ID (need ubuntu 24.04)" >&2; exit 1; }
 mkdir -p "${RUNNER_TEMP:?}/chromium-logs"
 [[ -x /usr/bin/python3 ]] || { echo 'Missing /usr/bin/python3; refusing apt/pip fallback' >&2; exit 1; }
-for cmd in sudo git tar zstd sha256sum timeout fallocate mkswap swapon swapoff free df du find sort xargs tee chmod nproc cp rmdir dirname tail sleep; do
-  command -v "$cmd" >/dev/null || { echo "Missing runner tool: $cmd; refusing apt/pip fallback" >&2; exit 1; }
-done
 # Record monotonic boot time so NTP wall-clock adjustments cannot skew stage budgets.
 /usr/bin/python3 -c 'import time; print(int(time.clock_gettime(time.CLOCK_BOOTTIME)))' > "$RUNNER_TEMP/chromium-job-start"
 # Disk layout: / (OS disk) receives the swap file; /mnt (the larger ephemeral
