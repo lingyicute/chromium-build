@@ -50,14 +50,16 @@ jobs:
           persist-credentials: false
           fetch-depth: 1
       - name: Validate control-plane inputs (never shell-interpolate expressions)
+        id: validate
         timeout-minutes: 1
+        shell: bash
         env:
           STAGE: ${{ inputs.stage }}
           ARTIFACT_ID: ${{ inputs.artifact-id }}
           EXPECTED_SHA256: ${{ inputs.sha256 }}
           FINAL_STAGE: ${{ inputs.final }}
         run: |
-          python3 - <<'PY'
+          /usr/bin/python3 - <<'PY'
           import os, re
           # Stage 00 builds a fresh tree, so it must not name a checkpoint.
           fresh = os.environ['STAGE'] == '00'
@@ -211,7 +213,7 @@ jobs:
           retention-days: 3
           overwrite: false
       - name: Save stage logs
-        if: always()
+        if: always() && steps.validate.outcome == 'success'
         # Diagnostics must never fail a stage whose checkpoint or APK is already
         # safe, nor push the worst-case schedule past the job limit.
         timeout-minutes: 1
