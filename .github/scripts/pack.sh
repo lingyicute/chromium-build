@@ -11,10 +11,12 @@ mkdir -p "$CR_TRANSFER/checkpoint"
 # full uncompressed tree + a full archive need not fit simultaneously.
 # Preserve hidden files, nanosecond mtimes, symlinks, .git, vpython and CIPD.
 # Do not use --dereference or --exclude-vcs.
-# Ensure read-only directories (e.g. from CIPD/third-party caches) are writable
-# by owner so tar --remove-files can unlink/rmdir them; chmod does not alter
-# directory mtimes or regular file permission bits.
-find "$CR_ROOT" -mindepth 1 -type d ! -perm -u+w -exec chmod u+w {} +
+# Ensure restricted directories (e.g. from CIPD/third-party caches) grant u+rwx
+# before descending so tar --remove-files can traverse, unlink, and rmdir them;
+# chmod does not alter directory mtimes or regular file permission bits.
+find "$CR_ROOT" -type d ! -perm -u+rwx -exec chmod u+rwx {} \;
+# Remove stale Unix sockets (tar ignores sockets and then fails rmdir).
+find "$CR_ROOT" -mindepth 1 -type s -delete
 # Archive the ENTRIES of $CR_ROOT (dotglob covers .gclient etc.), never "."
 # itself: with --remove-files tar would finish by rmdir'ing $CR_ROOT, which is
 # denied because /mnt belongs to root, and tar's exit status 2 would abort the
