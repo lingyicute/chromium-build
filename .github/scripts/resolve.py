@@ -22,6 +22,9 @@ RETRYABLE_HTTP_CODES = frozenset({408, 429})
 MAX_RETRY_AFTER_SECONDS = 60.0
 
 
+VERSION_PATTERN = re.compile(r'(?:0|[1-9][0-9]{0,3})(?:\.(?:0|[1-9][0-9]{0,5})){3}')
+
+
 class _NoRedirectHandler(urllib.request.HTTPRedirectHandler):
     def redirect_request(self, req, fp, code, msg, headers, newurl):
         if fp is not None:
@@ -45,7 +48,7 @@ def validate(releases):
         raise ValueError('Missing Chromium hashes')
     version = release.get('version')
     revision = hashes.get('chromium')
-    if not isinstance(version, str) or not re.fullmatch(r'[0-9]{1,4}(?:\.[0-9]{1,6}){3}', version):
+    if not isinstance(version, str) or not VERSION_PATTERN.fullmatch(version):
         raise ValueError('Invalid version')
     if not isinstance(revision, str) or not re.fullmatch(r'[0-9a-f]{40}', revision):
         raise ValueError('Invalid Chromium commit')
