@@ -89,7 +89,7 @@ def _retry_delay(attempt, retry_delay, headers=None, now=None):
                 ref = now if now is not None else datetime.datetime.now(datetime.timezone.utc)
                 delta = (target - ref).total_seconds()
                 return max(0.0, min(delta, MAX_RETRY_AFTER_SECONDS))
-    return retry_delay * (2 ** (attempt - 1))
+    return min(retry_delay * (2.0 ** min(attempt - 1, 60)), MAX_RETRY_AFTER_SECONDS)
 
 
 def fetch_release_json(url=URL, timeout=90, attempts=FETCH_ATTEMPTS,
