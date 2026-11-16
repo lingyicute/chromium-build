@@ -68,7 +68,8 @@ swap_gib=16
 root_free_gib=$(/usr/bin/python3 -c 'import shutil; print(shutil.disk_usage("/").free // 2**30)')
 (( root_free_gib - swap_gib >= 8 )) || swap_gib=$(( root_free_gib - 8 ))
 (( swap_gib >= 8 )) || { echo "Only ${root_free_gib} GiB free on / after cleanup; cannot place a >= 8 GiB swap file" >&2; exit 1; }
-sudo fallocate -l "${swap_gib}G" /chromium-relay.swap
+sudo rm -f -- /chromium-relay.swap
+sudo bash -c 'umask 077 && exec fallocate -l "$1" /chromium-relay.swap' _ "${swap_gib}G"
 sudo chmod 600 /chromium-relay.swap
 sudo mkswap /chromium-relay.swap >/dev/null
 sudo swapon /chromium-relay.swap
