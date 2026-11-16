@@ -40,7 +40,12 @@ for dir in /usr/local/lib/android /usr/local/.ghcup /usr/share/dotnet \
   cleanup+=("$!")
 done
 sudo mkdir -p /mnt/chromium-relay /mnt/chromium-transfer
-sudo chown "$(id -u):$(id -g)" /mnt/chromium-relay /mnt/chromium-transfer
+for workdir in /mnt/chromium-relay /mnt/chromium-transfer; do
+  [[ -d "$workdir" && ! -L "$workdir" ]] || { echo "Refusing non-directory or symlink: $workdir" >&2; exit 1; }
+  sudo chown -h "$(id -u):$(id -g)" "$workdir"
+  existing=$(ls -A -- "$workdir")
+  [[ -z "$existing" ]] || { echo "Expected fresh empty runner directory: $workdir" >&2; exit 1; }
+done
 # The image ships its own swap file on /mnt; reclaim that space for the tree.
 while IFS= read -r dev; do
   [[ "$dev" == /mnt/* ]] || continue
