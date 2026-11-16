@@ -1030,6 +1030,7 @@ class Hardening(unittest.TestCase):
             (cr / 'metadata').mkdir(parents=True)
             (cr / 'src/chrome').mkdir(parents=True)
             (cr / 'src/out/Release').mkdir(parents=True)
+            (cr / 'src/buildtools/linux64').mkdir(parents=True)
             (cr / 'src/third_party/ninja').mkdir(parents=True)
             (cr / 'depot_tools').mkdir(parents=True)
             for repo in (cr / 'src', cr / 'depot_tools'):
@@ -1044,9 +1045,10 @@ class Hardening(unittest.TestCase):
             (ws / 'config/args.gn').write_bytes(b'is_debug = false\n')
             (cr / 'src/out/Release/args.gn').write_bytes(b'is_debug = false\n')
             (cr / 'src/out/Release/build.ninja').write_text('')
-            ninja = cr / 'src/third_party/ninja/ninja'
-            ninja.write_text('#!/bin/sh\n')
-            ninja.chmod(0o755)
+            for rel in ('src/buildtools/linux64/gn', 'src/third_party/ninja/ninja'):
+                tool = cr / rel
+                tool.write_text('#!/bin/sh\n')
+                tool.chmod(0o755)
             (cr / 'src/chrome/VERSION').write_text(' MAJOR = 158 \nMINOR=0\nBUILD=8127\nPATCH=36\n')
             lock = {
                 'repository': 'o/r', 'run_id': '1', 'workflow_sha': 'c' * 40,
