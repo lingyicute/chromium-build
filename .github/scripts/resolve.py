@@ -92,6 +92,20 @@ def _retry_delay(attempt, retry_delay, headers=None, now=None):
     return min(retry_delay * (2.0 ** min(attempt - 1, 60)), MAX_RETRY_AFTER_SECONDS)
 
 
+def _content_length(headers):
+    raw_len = _header_value(headers, 'Content-Length')
+    if raw_len is None:
+        return None
+    if not isinstance(raw_len, str):
+        raise ValueError('Invalid ChromiumDash Content-Length')
+    text = raw_len.strip()
+    if not re.fullmatch(r'[0-9]+', text):
+        raise ValueError('Invalid ChromiumDash Content-Length')
+    if len(text) > len(str(MAX_BYTES)) or int(text) > MAX_BYTES:
+        raise ValueError('Oversized response')
+    return int(text)
+
+
 def fetch_release_json(url=URL, timeout=90, attempts=FETCH_ATTEMPTS,
                        retry_delay=RETRY_BASE_SECONDS, opener=None):
     parsed = urllib.parse.urlsplit(url) if isinstance(url, str) else None
@@ -121,11 +135,19 @@ def fetch_release_json(url=URL, timeout=90, attempts=FETCH_ATTEMPTS,
                     raise ValueError(f'Unexpected ChromiumDash HTTP status: {status}')
                 if response.url != url:
                     raise ValueError('Unexpected ChromiumDash redirect')
+                expected_len = _content_length(getattr(response, 'headers', None))
                 raw = response.read(MAX_BYTES + 1)
-            if not raw:
-                raise ValueError('Empty ChromiumDash response')
+                remaining = getattr(response, 'length', None)
             if len(raw) > MAX_BYTES:
                 raise ValueError('Oversized response')
+            if expected_len is not None and len(raw) < expected_len:
+                raise http.client.IncompleteRead(raw, expected_len - len(raw))
+            if not isinstance(remaining, bool) and isinstance(remaining, int) and remaining > 0:
+                raise http.client.IncompleteRead(raw, remaining)
+            if expected_len is not None and len(raw) > expected_len:
+                raise ValueError('ChromiumDash response exceeded Content-Length')
+            if not raw:
+                raise ValueError('Empty ChromiumDash response')
             return raw
         except urllib.error.HTTPError as exc:
             retryable = exc.code in RETRYABLE_HTTP_CODES or exc.code >= 500
