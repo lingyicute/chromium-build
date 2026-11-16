@@ -300,7 +300,7 @@ def report(message):
     if not path:
         return
     try:
-        with open(path, 'a') as f:
+        with open(path, 'a', encoding='utf-8') as f:
             f.write(f'- {message}\n')
     except OSError:
         pass
@@ -318,6 +318,8 @@ def main():
         if len(args) == 4:
             if args[2] != '--chunk-size':
                 raise ValueError('Unknown option')
+            if not re.fullmatch(r'[1-9][0-9]*', args[3]):
+                raise ValueError('chunk_size must be a positive integer')
             chunk_size = int(args[3])
         t0 = time.monotonic()
         sha256, count, total = pack_stream(directory, sys.stdin.buffer, chunk_size=chunk_size)
