@@ -1049,7 +1049,7 @@ class Hardening(unittest.TestCase):
                 tool = cr / rel
                 tool.write_text('#!/bin/sh\n')
                 tool.chmod(0o755)
-            (cr / 'src/chrome/VERSION').write_text(' MAJOR = 158 \nMINOR=0\nBUILD=8127\nPATCH=36\n')
+            (cr / 'src/chrome/VERSION').write_text('# comment=ignored\n MAJOR = 158 \nMINOR=0\nBUILD=8127\nPATCH=36\n')
             lock = {
                 'repository': 'o/r', 'run_id': '1', 'workflow_sha': 'c' * 40,
                 'target': 'chrome_public_apk', 'architecture': 'arm64',
@@ -1063,6 +1063,13 @@ class Hardening(unittest.TestCase):
             p = subprocess.run([sys.executable, '-c', script], env=env, capture_output=True, text=True)
             self.assertEqual(p.returncode, 0, p.stderr)
 
+            (cr / 'src/buildtools/linux64/gn').unlink()
+            p = subprocess.run([sys.executable, '-c', script], env=env, capture_output=True, text=True)
+            self.assertNotEqual(p.returncode, 0)
+            self.assertIn('buildtools/linux64/gn', p.stderr)
+            (cr / 'src/buildtools/linux64/gn').write_text('#!/bin/sh\n')
+            (cr / 'src/buildtools/linux64/gn').chmod(0o755)
+
             (cr / 'src/chrome/VERSION').write_text('MAJOR=158\nMINOR=0\nBUILD=8127\n')
             p = subprocess.run([sys.executable, '-c', script], env=env, capture_output=True, text=True)
             self.assertNotEqual(p.returncode, 0)
@@ -1073,6 +1080,15 @@ class Hardening(unittest.TestCase):
             p = subprocess.run([sys.executable, '-c', script], env=env, capture_output=True, text=True)
             self.assertNotEqual(p.returncode, 0)
             self.assertIn('source/target/architecture mismatch', p.stderr)
+
+            # Missing .git must not climb into an ancestor repository.
+            import shutil
+            shutil.rmtree(cr / 'src/.git')
+            subprocess.run(['git', 'init', '-q', str(tmp)], check=True)
+            (cr / 'metadata/build-lock.json').write_text(json.dumps(lock))
+            p = subprocess.run([sys.executable, '-c', script], env=env, capture_output=True, text=True)
+            self.assertNotEqual(p.returncode, 0)
+            self.assertIn('missing .git', p.stderr)
 
         self.assertIn("'generate_location_tags': False", (ROOT / '.github/scripts/fetch.sh').read_text())
         self.assertIn('trap reap_cleanup EXIT', (ROOT / '.github/scripts/host.sh').read_text())
@@ -1088,8 +1104,172 @@ class Hardening(unittest.TestCase):
         ok, _ = rv.verdict(prepare=('unknown', 'running'), part_01=('success', 'completed'))
         self.assertFalse(ok)
 
-        ok, _ = rv.verdict(prepare=('success', 'completed'), part_01=('success', 'completed'))
+        ok, summary = rv.verdict(prepare=('success', 'completed'), part_01=('success', 'completed'))
         self.assertFalse(ok)
+        self.assertIn('multiple stages reported `completed`', summary)
+        self.assertNotIn('unverified-apk-*', summary)
+
+        ok, _ = rv.verdict(prepare=('skipped', ''), part_01=('success', 'completed'))
+        self.assertFalse(ok)
+
+        ok, _ = rv.verdict(prepare=('success', ''), part_01=('success', 'completed'))
+        self.assertFalse(ok)
+
+        ok, _ = rv.verdict(prepare=('success', 'completed'), part_01=('success', 'running'))
+        self.assertFalse(ok)
+
+        ok, summary = rv.verdict(prepare=('success', 'completed'), part_01=('failure', ''))
+        self.assertFalse(ok)
+        self.assertIn('failed or were cancelled: part-01.', summary)
+        self.assertNotIn('unverified-apk-*', summary)
+
+    def test_common_xdg_isolation_and_interruptible_backoff(self):
+        import time
+
+        with tempfile.TemporaryDirectory() as tmp:
+            p = subprocess.run(
+                ['bash', '-c', 'source "$1/common.sh"; printf "%s\\n%s\\n%s\\n%s\\n" '
+                 '"$XDG_CONFIG_HOME" "$XDG_DATA_HOME" "$XDG_STATE_HOME" "${GIT_DIR:-unset}"',
+                 '_', str(ROOT / '.github/scripts')],
+                env=dict(os.environ, RUNNER_TEMP=tmp, XDG_CONFIG_HOME='/home/runner/.config', GIT_DIR='/bad'),
+                capture_output=True, text=True)
+            self.assertEqual(p.returncode, 0, p.stderr)
+            self.assertEqual(p.stdout.splitlines(), [
+                '/mnt/chromium-relay/cache/xdg-config',
+                '/mnt/chromium-relay/cache/xdg-data',
+                '/mnt/chromium-relay/cache/xdg-state',
+                'unset',
+            ])
+
+            p = subprocess.run(
+                ['bash', '-c', 'source "$1/common.sh"; retry true', '_', str(ROOT / '.github/scripts')],
+                env=dict(os.environ, RUNNER_TEMP=tmp, CR_RETRY_DELAY='9999999999999999999'),
+                capture_output=True, text=True)
+            self.assertNotEqual(p.returncode, 0)
+            self.assertIn('Invalid CR_RETRY_DELAY', p.stderr)
+
+            t0 = time.monotonic()
+            p = subprocess.run(
+                ['bash', '-c', 'source "$1/common.sh"; ( sleep 0.15; kill -TERM $$ ) & retry false',
+                 '_', str(ROOT / '.github/scripts')],
+                env=dict(os.environ, RUNNER_TEMP=tmp, CR_RETRY_DELAY='10'),
+                capture_output=True, text=True)
+            self.assertEqual(p.returncode, 143)
+            self.assertLess(time.monotonic() - t0, 3.0)
+
+    def test_resolve_truncation_redirect_close_backoff_and_metadata(self):
+        closed = []
+
+        class _Closable:
+            def close(self):
+                closed.append(True)
+
+        with self.assertRaises(ValueError):
+            resolve._NoRedirectHandler().redirect_request(None, _Closable(), 302, 'Found', {}, 'https://x.test/')
+        self.assertEqual(closed, [True])
+
+        truncated = _FakeResponse(b'[{"partial":')
+        truncated.headers = {'Content-Length': '200'}
+        complete = _FakeResponse(b'[]')
+        complete.headers = {'Content-Length': '2'}
+        opener = _FakeOpener([truncated, complete])
+        self.assertEqual(resolve.fetch_release_json(attempts=2, retry_delay=0.0, opener=opener), b'[]')
+        self.assertEqual(opener.calls, 2)
+
+        self.assertEqual(resolve._retry_delay(2000, 2.0), resolve.MAX_RETRY_AFTER_SECONDS)
+        for bad_ver in ('01.0.0.0', '158.00.8127.36', '158.0.08127.36'):
+            with self.assertRaises(ValueError):
+                resolve.validate([dict(channel='Stable', platform='Android', version=bad_ver,
+                                       hashes={'chromium': 'a' * 40})])
+        for bad_url in ('https://:443/x', 'https://user:pass@chromiumdash.appspot.com/x'):
+            with self.assertRaises(ValueError):
+                resolve.fetch_release_json(url=bad_url, opener=_FakeOpener([]))
+        with self.assertRaises(ValueError):
+            resolve.parse_release_json(b'[NaN]')
+        with self.assertRaises(ValueError):
+            resolve.validate_run_metadata('bad repo', 'a' * 40, '1')
+        with self.assertRaises(ValueError):
+            resolve.validate_run_metadata('o/r', 'not-sha', '1')
+        with self.assertRaises(ValueError):
+            resolve.validate_run_metadata('o/r', 'a' * 40, '0')
+
+    def test_checkpoint_close_failure_symlink_dir_and_overgrowth(self):
+        from unittest import mock
+
+        class _BadCloseWriter:
+            def __init__(self, real):
+                self._real = real
+
+            def write(self, data):
+                raise OSError('ENOSPC on write')
+
+            def close(self):
+                self._real.close()
+                raise OSError('ENOSPC on close')
+
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            dest = base / 'real'
+            dest.mkdir()
+            orig_open = checkpoint._open_exclusive_wo
+            with mock.patch.object(checkpoint, '_open_exclusive_wo',
+                                   side_effect=lambda p: _BadCloseWriter(orig_open(p))):
+                with self.assertRaises(OSError):
+                    checkpoint.pack_stream(dest, io.BytesIO(b'abcd'), chunk_size=4)
+            self.assertEqual(list(dest.iterdir()), [])
+
+            sym_dir = base / 'sym'
+            sym_dir.symlink_to(dest)
+            with self.assertRaises(ValueError):
+                checkpoint.pack_stream(sym_dir, io.BytesIO(b'abcd'), chunk_size=4)
+
+            sha, _, _ = checkpoint.pack_stream(dest, io.BytesIO(b'abcd'), chunk_size=4)
+            with self.assertRaises(ValueError):
+                checkpoint.restore_stream(sym_dir, sha, io.BytesIO())
+
+            orig_verify = checkpoint._verify_and_open
+
+            def grow_after_verify(path, entry):
+                f = orig_verify(path, entry)
+                with open(path, 'ab') as w:
+                    w.write(b'EXTRA')
+                return f
+
+            out = io.BytesIO()
+            with mock.patch.object(checkpoint, '_verify_and_open', side_effect=grow_after_verify):
+                with self.assertRaises(ValueError):
+                    checkpoint.restore_stream(dest, sha, out)
+            self.assertEqual(out.getvalue(), b'')
+
+    def test_build_multithreaded_zombie_negative_start_and_stage00_budget(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            proc = Path(tmp)
+            (proc / '123/task/123').mkdir(parents=True)
+            (proc / '123/task/124').mkdir(parents=True)
+            fields = ['Z', '1', '123', '555'] + ['0'] * 13 + ['2', '0']
+            (proc / '123/stat').write_text('123 (lld) ' + ' '.join(fields) + '\n')
+            (proc / '123/task/123/stat').write_text('123 (lld) ' + ' '.join(fields) + '\n')
+            (proc / '123/task/124/stat').write_text('124 (lld) D 1 123 555\n')
+            self.assertEqual(build._live_session_pids(555, proc_root=proc), [123])
+            (proc / '123/task/124/stat').write_text('124 (lld) Z 1 123 555\n')
+            self.assertEqual(build._live_session_pids(555, proc_root=proc), [])
+
+            (proc / 'chromium-job-start').write_text('\uff11\uff10\n')
+            p = subprocess.run([sys.executable, str(ROOT / '.github/scripts/build.py')],
+                               env=dict(os.environ, CR_ROOT=str(proc), RUNNER_TEMP=str(proc),
+                                        STAGE='01', FINAL_STAGE='false', GITHUB_OUTPUT=str(proc / 'out')),
+                               capture_output=True, text=True)
+            self.assertNotEqual(p.returncode, 0)
+            self.assertIn('Invalid job start timestamp', p.stderr)
+
+        self.assertIsNone(build.swap_delta_mib(2048, 1024))
+        sp = StaticPolicy()
+        stage00 = sum(sp.step_timeout(name) for name in (
+            'Prepare disposable hosted runner', 'Resolve stable, fetch locked source',
+            'Save source resolution'))
+        self.assertLess(stage00 * 60 + build.MIN_BUDGET_SECONDS, build.NORMAL_JOB_DEADLINE_SECONDS)
+        stage_yml = (ROOT / '.github/workflows/chromium-stage.yml').read_text()
+        self.assertIn("if: always() && steps.validate.outcome == 'success'", stage_yml)
 
 
 if __name__ == '__main__':
