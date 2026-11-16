@@ -47,10 +47,14 @@ for workdir in /mnt/chromium-relay /mnt/chromium-transfer; do
   [[ -z "$existing" ]] || { echo "Expected fresh empty runner directory: $workdir" >&2; exit 1; }
 done
 # The image ships its own swap file on /mnt; reclaim that space for the tree.
+swap_devs=$(swapon --show=NAME --noheadings --raw)
 while IFS= read -r dev; do
   [[ "$dev" == /mnt/* ]] || continue
-  sudo swapoff -- "$dev" && sudo rm -f -- "$dev"
-done < <(swapon --show=NAME --noheadings --raw)
+  sudo swapoff -- "$dev"
+  if [[ -f "$dev" && ! -L "$dev" ]]; then
+    sudo rm -f -- "$dev"
+  fi
+done <<< "$swap_devs"
 # Reap every background deletion before failing so none keep running on error.
 cleanup_failed=0
 for pid in "${cleanup[@]}"; do
