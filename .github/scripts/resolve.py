@@ -95,8 +95,9 @@ def _retry_delay(attempt, retry_delay, headers=None, now=None):
 def fetch_release_json(url=URL, timeout=90, attempts=FETCH_ATTEMPTS,
                        retry_delay=RETRY_BASE_SECONDS, opener=None):
     parsed = urllib.parse.urlsplit(url) if isinstance(url, str) else None
-    if parsed is None or parsed.scheme != 'https' or not parsed.netloc:
-        raise ValueError('ChromiumDash URL must use https')
+    if (parsed is None or parsed.scheme != 'https' or not parsed.hostname
+            or parsed.username is not None or parsed.password is not None):
+        raise ValueError('ChromiumDash URL must use https with a bare hostname')
     if isinstance(attempts, bool) or not isinstance(attempts, int) or attempts < 1:
         raise ValueError('attempts must be a positive integer')
     if (isinstance(timeout, bool) or not isinstance(timeout, (int, float))
