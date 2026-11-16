@@ -9,6 +9,9 @@ export CR_PYTHON=/usr/bin/python3
 export TMPDIR="${RUNNER_TEMP:?}/chromium-tmp"
 export HOME="$CR_ROOT/home"
 export XDG_CACHE_HOME="$CR_ROOT/cache/xdg"
+export XDG_CONFIG_HOME="$CR_ROOT/cache/xdg-config"
+export XDG_DATA_HOME="$CR_ROOT/cache/xdg-data"
+export XDG_STATE_HOME="$CR_ROOT/cache/xdg-state"
 # Keep CIPD's download instance cache outside $CR_ROOT so already-deployed
 # packages are not archived twice into every stage checkpoint.
 export CIPD_CACHE_DIR="$CR_TRANSFER/cipd-cache"
