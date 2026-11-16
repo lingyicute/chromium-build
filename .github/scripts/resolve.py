@@ -106,6 +106,13 @@ def _content_length(headers):
     return int(text)
 
 
+def parse_release_json(raw):
+    def _reject_constant(token):
+        raise ValueError(f'Invalid JSON constant: {token}')
+
+    return json.loads(raw.decode('utf-8'), parse_constant=_reject_constant)
+
+
 def fetch_release_json(url=URL, timeout=90, attempts=FETCH_ATTEMPTS,
                        retry_delay=RETRY_BASE_SECONDS, opener=None):
     parsed = urllib.parse.urlsplit(url) if isinstance(url, str) else None
@@ -176,8 +183,8 @@ def main():
     meta = root / 'metadata'
     meta.mkdir(parents=True, exist_ok=True)
     raw = fetch_release_json()
-    version, revision = validate(json.loads(raw))
-    depot = (Path(os.environ['GITHUB_WORKSPACE']) / 'config/depot_tools_revision.txt').read_text().strip()
+    version, revision = validate(parse_release_json(raw))
+    depot = (Path(os.environ['GITHUB_WORKSPACE']) / 'config/depot_tools_revision.txt').read_text(encoding='utf-8').strip()
     if not re.fullmatch(r'[0-9a-f]{40}', depot):
         raise ValueError('depot_tools must be a full, reviewed commit SHA')
     lock = dict(version=version, chromium_revision=revision, depot_tools_revision=depot,
@@ -187,7 +194,7 @@ def main():
                 run_id=os.environ['GITHUB_RUN_ID'],
                 resolved_at=datetime.datetime.now(datetime.timezone.utc).isoformat())
     (meta / 'chromiumdash.json').write_bytes(raw)
-    (meta / 'build-lock.json').write_text(json.dumps(lock, indent=2) + '\n')
+    (meta / 'build-lock.json').write_text(json.dumps(lock, indent=2) + '\n', encoding='utf-8')
     print(json.dumps(lock, indent=2))
 
 
