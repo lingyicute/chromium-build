@@ -1,14 +1,14 @@
 #!/usr/bin/env bash
 source "$(dirname "$0")/common.sh"
 release="$RUNNER_TEMP/chromium-release"
-rm -rf "$release"
+rm -rf -- "$release"
 mkdir -p "$release"
 apk="$CR_ROOT/src/out/Release/apks/ChromePublic.apk"
-[[ -s "$apk" ]] || fail 'Ninja succeeded but ChromePublic.apk is missing'
+[[ -f "$apk" && ! -L "$apk" && -s "$apk" ]] || fail 'Ninja succeeded but ChromePublic.apk is missing'
 # Verify with SDK/JDK distributed through Chromium DEPS, not runner Android SDK.
 build_tools_root="$CR_ROOT/src/third_party/android_sdk/public/build-tools"
 [[ -d "$build_tools_root" ]] || fail 'Chromium-managed Android build-tools directory missing'
-apksigner=$(find "$build_tools_root" -mindepth 2 -maxdepth 2 -path "$build_tools_root/[!.]*/apksigner" -xtype f -executable | sort -V | tail -1)
+apksigner=$(find "$build_tools_root" -mindepth 2 -maxdepth 2 ! -path '*/.*/*' -name apksigner -xtype f -executable | sort -V | tail -1)
 [[ -n "$apksigner" ]] || fail 'Chromium-managed Android build-tools apksigner missing'
 build_tools_dir=$(dirname "$apksigner")
 export JAVA_HOME="$CR_ROOT/src/third_party/jdk/current"
@@ -23,19 +23,19 @@ if [[ -f "$bundled_aapt2" && -x "$bundled_aapt2" ]]; then
 else
   aapt2="$build_tools_dir/aapt2"
 fi
-apk_meta="$TMPDIR/chromium-apk-meta.json"
-trap 'rm -f "$apk_meta"' EXIT
+apk_meta=$(mktemp "$TMPDIR/chromium-apk-meta.XXXXXX.json")
+trap 'rm -f -- "$apk_meta"' EXIT
 "$CR_PYTHON" - "$apk" "$CR_ROOT/metadata/build-lock.json" "$aapt2" "$apk_meta" <<'PY'
 import json, os, re, subprocess, sys, zipfile
 from pathlib import Path
 
 apk_path = Path(sys.argv[1])
-lock = json.loads(Path(sys.argv[2]).read_text())
+lock = json.loads(Path(sys.argv[2]).read_text(encoding='utf-8'))
 aapt2 = Path(sys.argv[3])
 meta_out = Path(sys.argv[4])
 
 with zipfile.ZipFile(apk_path) as zf:
-    infos = [info for info in zf.infolist() if info.file_size > 0]
+    infos = [info for info in zf.infolist() if not info.is_dir() and info.file_size > 0]
 names = {info.filename for info in infos}
 if 'AndroidManifest.xml' not in names:
     raise SystemExit('APK missing non-empty AndroidManifest.xml')
@@ -46,11 +46,15 @@ if not any(re.fullmatch(r'lib/arm64-v8a/[^/]+\.so', name) for name in names):
 
 if not (aapt2.is_file() and os.access(aapt2, os.X_OK)):
     raise SystemExit('Chromium-managed Android build-tools aapt2 missing')
-badging = subprocess.check_output([str(aapt2), 'dump', 'badging', str(apk_path)], text=True)
+badging = subprocess.check_output([str(aapt2), 'dump', 'badging', str(apk_path)],
+                                  text=True, encoding='utf-8', errors='replace')
 pkg_line = re.search(r'^package:\s*(.+)$', badging, re.M)
 if not pkg_line:
     raise SystemExit('aapt2 output missing package line')
 pkg_text = pkg_line.group(1)
+pkg_name = re.search(r"name='([^']+)'", pkg_text)
+if not pkg_name:
+    raise SystemExit('aapt2 output missing package name')
 ver_match = re.search(r"versionName='([^']+)'", pkg_text)
 if not ver_match or ver_match.group(1) != lock['version']:
     raise SystemExit(f"APK versionName mismatch: {ver_match.group(1) if ver_match else 'missing'} != {lock['version']}")
@@ -62,17 +66,16 @@ if not abi_line:
 if 'arm64-v8a' not in re.findall(r"'([^']+)'", abi_line.group(1)):
     raise SystemExit(f'APK native-code missing arm64-v8a: {abi_line.group(1)}')
 
-pkg_name = re.search(r"name='([^']+)'", pkg_text)
 ver_code = re.search(r"versionCode='([^']+)'", pkg_text)
 min_sdk = re.search(r"^sdkVersion:'([^']+)'", badging, re.M)
 target_sdk = re.search(r"^targetSdkVersion:'([^']+)'", badging, re.M)
 meta = {
-    'package': pkg_name.group(1) if pkg_name else None,
+    'package': pkg_name.group(1),
     'version_code': ver_code.group(1) if ver_code else None,
     'min_sdk': min_sdk.group(1) if min_sdk else None,
     'target_sdk': target_sdk.group(1) if target_sdk else None,
 }
-meta_out.write_text(json.dumps(meta) + '\n')
+meta_out.write_text(json.dumps(meta) + '\n', encoding='utf-8')
 PY
 cp "$apk" "$release/Chromium-Stable-arm64.apk"
 cp -a "$CR_ROOT/metadata" "$release/metadata"
