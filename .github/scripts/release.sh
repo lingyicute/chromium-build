@@ -16,7 +16,13 @@ export JAVA_HOME="$CR_ROOT/src/third_party/jdk/current"
 export PATH="$JAVA_HOME/bin:/usr/bin:/bin:/usr/sbin:/sbin"
 [[ -x "$apksigner" && -x "$JAVA_HOME/bin/java" ]] || fail 'Chromium-managed APK verifier/JDK missing'
 "$apksigner" verify --verbose --print-certs "$apk" 2>&1 | tee -i "$release/apk-signature.txt"
-aapt2="$build_tools_dir/aapt2"
+# Prefer the CIPD aapt2 that compiled the APK resources; fall back to SDK build-tools aapt2.
+bundled_aapt2="$CR_ROOT/src/third_party/android_build_tools/aapt2/cipd/aapt2"
+if [[ -f "$bundled_aapt2" && -x "$bundled_aapt2" ]]; then
+  aapt2="$bundled_aapt2"
+else
+  aapt2="$build_tools_dir/aapt2"
+fi
 apk_meta="$TMPDIR/chromium-apk-meta.json"
 trap 'rm -f "$apk_meta"' EXIT
 "$CR_PYTHON" - "$apk" "$CR_ROOT/metadata/build-lock.json" "$aapt2" "$apk_meta" <<'PY'
