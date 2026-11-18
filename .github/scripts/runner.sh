@@ -28,3 +28,24 @@ require_empty_directory() {
     || runner_fail "Cannot inspect contents of $dir"
   [[ -z "$entry" ]] || runner_fail "Expected an empty directory: $dir"
 }
+
+# st_dev cannot detect same-filesystem bind mounts. mountinfo paths use octal
+# escapes, so compare decoded path boundaries rather than grepping for a prefix.
+check_mount_targets() {
+  local id parent device root encoded extra target dir seen=0
+  while IFS=' ' read -r id parent device root encoded extra; do
+    [[ -n "$encoded" ]] || runner_fail 'Malformed runner mount table'
+    printf -v target '%b' "$encoded"
+    seen=1
+    for dir in "$@"; do
+      if [[ "$target" == "$dir" || "$target" == "$dir/"* ]]; then
+        runner_fail "Refusing mount at or below $dir: $target"
+      fi
+    done
+  done
+  (( seen )) || runner_fail 'Empty runner mount table'
+}
+
+require_no_mount_targets() {
+  check_mount_targets "$@" < /proc/self/mountinfo || runner_fail 'Cannot inspect runner mounts'
+}

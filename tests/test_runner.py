@@ -30,6 +30,21 @@ class RunnerGuards(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn('separate /mnt filesystem', result.stderr)
 
+    def test_mount_targets_reject_nested_and_same_device_bind_mounts(self):
+        command = 'source "$1/runner.sh"; check_mount_targets "$2"'
+        baseline = '1 0 8:1 / / rw - ext4 /dev/sda rw\n2 1 8:2 / /mnt rw - ext4 /dev/sdb rw\n'
+        directory = '/mnt/test relay'
+        targets = (('/mnt/test\\040relayed', True), ('/mnt/test\\040relay', False),
+                   ('/mnt/test\\040relay/source\\011files', False))
+        for target, allowed in targets:
+            with self.subTest(target=target):
+                mountinfo = baseline + f'3 2 8:2 /bind-source {target} rw - ext4 /dev/sdb rw\n'
+                result = subprocess.run(['bash', '-euc', command, '_', str(SCRIPTS), directory],
+                                        input=mountinfo, capture_output=True, text=True, timeout=5)
+                self.assertEqual(result.returncode == 0, allowed, result.stderr)
+                if not allowed:
+                    self.assertIn('Refusing mount at or below /mnt/test relay', result.stderr)
+
     def test_trailing_newlines_do_not_hide_directory_entries(self):
         with tempfile.TemporaryDirectory() as tmp:
             command = 'source "$1/runner.sh"; require_empty_directory "$2"'

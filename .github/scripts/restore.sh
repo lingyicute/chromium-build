@@ -8,6 +8,7 @@ require_hosted_runner
 require_relay_mount
 require_relay_directory "$CR_ROOT"
 require_relay_directory "$CR_TRANSFER"
+require_no_mount_targets "$CR_ROOT" "$CR_TRANSFER"
 require_relay_directory "$CR_TRANSFER/checkpoint"
 require_empty_directory "$CR_ROOT"
 "$CR_PYTHON" "$GITHUB_WORKSPACE/.github/scripts/checkpoint.py" restore-stream "$CR_TRANSFER/checkpoint" \

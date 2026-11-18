@@ -20,6 +20,10 @@ mkdir -p "${RUNNER_TEMP:?}/chromium-logs"
 # Refuse an unexpected layout before any purge, chown or swap operation.
 require_relay_mount
 workdirs=(/mnt/chromium-relay /mnt/chromium-transfer)
+purge_dirs=(/usr/local/lib/android /usr/local/.ghcup /usr/share/dotnet
+  /usr/share/swift /usr/local/share/powershell /usr/lib/google-cloud-sdk
+  /opt/ghc /opt/az)
+require_no_mount_targets "${workdirs[@]}" "${purge_dirs[@]}"
 for workdir in "${workdirs[@]}"; do
   if [[ -e "$workdir" || -L "$workdir" ]]; then
     require_relay_directory "$workdir"
@@ -44,10 +48,8 @@ reap_cleanup() {
   done
 }
 trap reap_cleanup EXIT
-for dir in /usr/local/lib/android /usr/local/.ghcup /usr/share/dotnet \
-  /usr/share/swift /usr/local/share/powershell /usr/lib/google-cloud-sdk \
-  /opt/ghc /opt/az; do
-  sudo rm -rf -- "$dir" &
+for dir in "${purge_dirs[@]}"; do
+  sudo rm -rf --one-file-system -- "$dir" &
   cleanup+=("$!")
 done
 sudo mkdir -p -- "${workdirs[@]}"
