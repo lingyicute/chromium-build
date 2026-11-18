@@ -440,7 +440,7 @@ class Supervisor(unittest.TestCase):
                 ninja.chmod(0o755)
                 (tmp / 'chromium-job-start').write_text(str(int(build.monotonic_now())))
                 env = dict(os.environ, CR_ROOT=str(root), RUNNER_TEMP=str(tmp), STAGE='03',
-                           FINAL_STAGE='false', GITHUB_RUN_ATTEMPT='1', GITHUB_OUTPUT=str(tmp / 'output'),
+                           GITHUB_RUN_ATTEMPT='1', GITHUB_OUTPUT=str(tmp / 'output'),
                            GITHUB_STEP_SUMMARY='')
                 with subprocess.Popen([sys.executable, str(ROOT / '.github/scripts/build.py')],
                                       env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
@@ -576,8 +576,11 @@ class StaticPolicy(unittest.TestCase):
             self.assertNotIn('continue-on-error', retries[0])
             self.assertEqual(inputs(retries[0]),
                              [line + '-retry' if line.startswith('name: ') else line for line in inputs(step)])
-        self.assertIn('artifact-id: ${{ steps.upload-retry.outputs.artifact-id || steps.upload.outputs.artifact-id }}',
-                      stage)
+        for primary, retry, step in (('upload', 'upload-retry', 'confirm-checkpoint'),
+                                     ('apk', 'apk-retry', 'confirm-apk')):
+            self.assertIn(f"steps.{primary}.outcome == 'success' && steps.{primary}.outputs.artifact-id", stage)
+            self.assertIn(f"steps.{retry}.outcome == 'success' && steps.{retry}.outputs.artifact-id", stage)
+            self.assertIn(f'steps.{step}.outputs.artifact-id', stage)
 
     def test_unverified_apk_is_kept_only_on_failure_under_its_own_name(self):
         stage = (ROOT / '.github/workflows/chromium-stage.yml').read_text()
@@ -619,18 +622,20 @@ class StaticPolicy(unittest.TestCase):
     def test_final_stage_and_budget_invariants(self):
         stable = (ROOT / '.github/workflows/chromium-stable.yml').read_text()
         stage = (ROOT / '.github/workflows/chromium-stage.yml').read_text()
-        self.assertEqual(len(re.findall(r'^\s+final:\s*true\s*$', stable, re.M)), 1)
-        self.assertRegex(stable, r'part-08:[\s\S]*?final:\s*true[\s\S]*?result:')
-        self.assertIn("if: steps.build.outputs.status == 'running' && !inputs.final", stage)
+        self.assertNotIn('inputs.final', stage)
+        self.assertRegex(stable, r"part-08:[\s\S]*?stage: '08'[\s\S]*?result:")
+        self.assertIn("if: steps.build.outputs.status == 'running' && inputs.stage != '08'", stage)
         # Round the whole shutdown allowance up, including bounded session cleanup.
         shutdown = math.ceil((build.STOP_GRACE_SECONDS + build.CLEANUP_TIMEOUT_SECONDS + 1) / 60)
         logs = self.step_timeout('Save stage logs')
         job_limit = int(re.search(r'^    timeout-minutes: (\d+)$', stage, re.M)[1])
         limit = job_limit - 4  # Pre-step job init, transitions and post-job work.
         self.assertLessEqual(build.NORMAL_JOB_DEADLINE_SECONDS // 60 + shutdown + self.step_timeout('Destructively')
-                             + self.step_timeout('Upload immutable checkpoint') + logs, limit)
+                             + self.step_timeout('Upload immutable checkpoint') + self.step_timeout('Confirm checkpoint upload')
+                             + logs, limit)
         post_build = sum(self.step_timeout(name) for name in (
-            'Verify APK signature', 'Upload APK', 'Retry the APK upload', 'Keep the unverified APK'))
+            'Verify APK signature', 'Upload APK', 'Retry the APK upload', 'Confirm APK upload',
+            'Keep the unverified APK'))
         self.assertLessEqual(build.FINAL_JOB_DEADLINE_SECONDS // 60 + shutdown + post_build + logs, limit)
         step_timeout = int(re.search(r'id: build\n(?:\s+#.*\n)*\s+timeout-minutes: (\d+)', stage)[1])
         self.assertGreaterEqual(step_timeout, build.FINAL_JOB_DEADLINE_SECONDS // 60 + shutdown)
@@ -656,7 +661,7 @@ class StaticPolicy(unittest.TestCase):
         script = textwrap.dedent(re.search(r"python3 - <<'PY'\n(.*?)\n *PY\n", stage, re.S)[1])
 
         def valid(**overrides):
-            env = dict(os.environ, STAGE='03', ARTIFACT_ID='123', EXPECTED_SHA256='a' * 64, FINAL_STAGE='false')
+            env = dict(os.environ, STAGE='03', ARTIFACT_ID='123', EXPECTED_SHA256='a' * 64)
             env.update(overrides)
             with tempfile.TemporaryDirectory() as tmp:
                 env['RUNNER_TEMP'] = tmp
@@ -665,23 +670,29 @@ class StaticPolicy(unittest.TestCase):
                 return ok
 
         self.assertTrue(valid())
-        self.assertTrue(valid(STAGE='08', FINAL_STAGE='true'))
+        self.assertTrue(valid(STAGE='08', ARTIFACT_ID='9007199254740991'))
         self.assertTrue(valid(STAGE='00', ARTIFACT_ID='', EXPECTED_SHA256=''))
         for bad in [dict(STAGE='09'), dict(STAGE='1'), dict(ARTIFACT_ID=''), dict(ARTIFACT_ID='0'),
-                    dict(EXPECTED_SHA256='A' * 64), dict(FINAL_STAGE='yes'), dict(STAGE='00'),
-                    dict(STAGE='00', ARTIFACT_ID='', EXPECTED_SHA256='', FINAL_STAGE='true')]:
+                    dict(EXPECTED_SHA256='A' * 64), dict(STAGE='00'),
+                    dict(ARTIFACT_ID='9007199254740992'), dict(ARTIFACT_ID='1' * 200)]:
             self.assertFalse(valid(**bad), bad)
 
 
 class ResultVerdict(unittest.TestCase):
     ORDER = ['prepare'] + [f'part-{i:02d}' for i in range(1, 9)]
 
-    def verdict(self, **jobs):
+    def verdict(self, output_overrides=None, **jobs):
         stable = (ROOT / '.github/workflows/chromium-stable.yml').read_text()
         script = textwrap.dedent(re.search(r"python3 - <<'PY'\n(.*?)\n *PY\n", stable, re.S)[1])
         needs = {name: dict(result='skipped', outputs={}) for name in self.ORDER}
         for name, (result, status) in jobs.items():
-            needs[name.replace('_', '-')] = dict(result=result, outputs=dict(status=status) if status else {})
+            outputs = dict(status=status) if status else {}
+            if status == 'running':
+                outputs.update({'artifact-id': '12345', 'sha256': 'a' * 64})
+            if status == 'completed' and result == 'success':
+                outputs['apk-id'] = '54321'
+            outputs.update((output_overrides or {}).get(name, {}))
+            needs[name.replace('_', '-')] = dict(result=result, outputs=outputs)
         with tempfile.TemporaryDirectory() as tmp:
             summary = Path(tmp) / 'summary.md'
             p = subprocess.run([sys.executable, '-c', script], capture_output=True, text=True,
@@ -694,12 +705,39 @@ class ResultVerdict(unittest.TestCase):
         self.assertIn('APK completed in `part-01`', summary)
         self.assertIn('| `part-02` | `skipped` | `-` |', summary)
 
+    def test_artifact_outputs_are_required_to_pass(self):
+        ok, summary = self.verdict({'prepare': {'apk-id': ''}}, prepare=('success', 'completed'))
+        self.assertFalse(ok)
+        self.assertIn('without a confirmed APK artifact', summary)
+        for outputs in ({'artifact-id': ''}, {'sha256': 'invalid'}):
+            ok, _ = self.verdict({'prepare': outputs}, prepare=('success', 'running'),
+                                 part_01=('success', 'completed'))
+            self.assertFalse(ok)
+
+    def test_confirmation_rejects_missing_or_unsafe_artifact_ids(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            output = Path(tmp) / 'outputs'
+            for value in ('', '0', '001', '9007199254740992', '1\nother=bad'):
+                p = subprocess.run(['bash', str(ROOT / '.github/scripts/confirm-upload.sh')],
+                                   env=dict(os.environ, TRANSFER_ID=value, GITHUB_OUTPUT=str(output)),
+                                   capture_output=True, text=True)
+                self.assertNotEqual(p.returncode, 0, value)
+                self.assertFalse(output.exists())
+            p = subprocess.run(['bash', str(ROOT / '.github/scripts/confirm-upload.sh')],
+                               env=dict(os.environ, TRANSFER_ID='9007199254740991', GITHUB_OUTPUT=str(output)),
+                               capture_output=True, text=True)
+            self.assertEqual(p.returncode, 0, p.stderr)
+            self.assertEqual(output.read_text(), 'artifact-id=9007199254740991\n')
+
     def test_exhausted_chain_fails(self):
         jobs = {name.replace('-', '_'): ('success', 'running') for name in self.ORDER}
         jobs['part_08'] = ('success', 'exhausted')
         ok, summary = self.verdict(**jobs)
         self.assertFalse(ok)
         self.assertIn('stage budget was exhausted', summary)
+        ok, summary = self.verdict({'prepare': {'sha256': ''}}, **jobs)
+        self.assertFalse(ok)
+        self.assertNotIn('stage budget was exhausted', summary)
 
     def test_skipped_prepare_fails(self):
         ok, summary = self.verdict()
@@ -1036,10 +1074,10 @@ class Hardening(unittest.TestCase):
             (t / 'chromium-job-start').write_text(str(int(build.monotonic_now())))
             p = subprocess.run([sys.executable, str(ROOT / '.github/scripts/build.py')],
                                env=dict(os.environ, CR_ROOT=str(t), RUNNER_TEMP=str(t),
-                                        STAGE='03', FINAL_STAGE='yes'),
+                                        STAGE='9'),
                                capture_output=True, text=True)
             self.assertNotEqual(p.returncode, 0)
-            self.assertIn('Invalid FINAL_STAGE', p.stderr)
+            self.assertIn('Invalid STAGE', p.stderr)
 
     def test_resolve_rejects_negative_delay_and_non_https_url(self):
         for kwargs in (dict(retry_delay=-0.1), dict(url='http://chromiumdash.appspot.com/x'),
@@ -1299,7 +1337,7 @@ class Hardening(unittest.TestCase):
             (proc / 'chromium-job-start').write_text('\uff11\uff10\n')
             p = subprocess.run([sys.executable, str(ROOT / '.github/scripts/build.py')],
                                env=dict(os.environ, CR_ROOT=str(proc), RUNNER_TEMP=str(proc),
-                                        STAGE='01', FINAL_STAGE='false', GITHUB_OUTPUT=str(proc / 'out')),
+                                        STAGE='01', GITHUB_OUTPUT=str(proc / 'out')),
                                capture_output=True, text=True)
             self.assertNotEqual(p.returncode, 0)
             self.assertIn('Invalid job start timestamp', p.stderr)

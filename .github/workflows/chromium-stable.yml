@@ -91,7 +91,6 @@ jobs:
       stage: '08'
       artifact-id: ${{ needs.part-07.outputs.artifact-id }}
       sha256: ${{ needs.part-07.outputs.sha256 }}
-      final: true
 
   result:
     needs: [prepare, part-01, part-02, part-03, part-04, part-05, part-06, part-07, part-08]
@@ -106,7 +105,7 @@ jobs:
         shell: bash
         run: |
           /usr/bin/python3 - <<'PY'
-          import json, os, sys
+          import json, os, re, sys
           raw_needs = json.loads(os.environ['NEEDS_JSON'])
           needs = raw_needs if isinstance(raw_needs, dict) else {}
           order = ['prepare'] + [f'part-{i:02d}' for i in range(1, 9)]
@@ -116,19 +115,29 @@ jobs:
           def stage_result(name):
               res = stage_job(name).get('result')
               return res if isinstance(res, str) and res else 'unknown'
-          def stage_status(name):
+          def stage_output(name, key):
               outputs = stage_job(name).get('outputs')
-              status = outputs.get('status') if isinstance(outputs, dict) else ''
-              return status if isinstance(status, str) else ''
+              value = outputs.get(key) if isinstance(outputs, dict) else ''
+              return value if isinstance(value, str) else ''
+          def stage_status(name):
+              return stage_output(name, 'status')
+          def valid_artifact_id(value):
+              return bool(re.fullmatch(r'[1-9][0-9]{0,15}', value) and int(value) <= 9007199254740991)
+          def successful_checkpoint(name):
+              return (stage_result(name) == 'success' and stage_status(name) == 'running'
+                      and valid_artifact_id(stage_output(name, 'artifact-id'))
+                      and re.fullmatch(r'[0-9a-f]{64}', stage_output(name, 'sha256')) is not None)
           def cell(text):
               return text.replace('`', '').replace('|', '/').replace('\r', ' ').replace('\n', ' ')
           errors = [name for name in order if stage_result(name) in ('failure', 'cancelled')]
           completed = [name for name in order if stage_status(name) == 'completed']
-          exhausted = any(stage_status(name) == 'exhausted' for name in order)
+          exhausted = (stage_result(order[-1]) == 'success' and stage_status(order[-1]) == 'exhausted'
+                       and all(successful_checkpoint(n) for n in order[:-1]))
           if len(completed) == 1:
               idx = order.index(completed[0])
               ok = (stage_result(completed[0]) == 'success'
-                    and all(stage_result(n) == 'success' and stage_status(n) == 'running' for n in order[:idx])
+                    and valid_artifact_id(stage_output(completed[0], 'apk-id'))
+                    and all(successful_checkpoint(n) for n in order[:idx])
                     and all(stage_result(n) == 'skipped' and stage_status(n) == '' for n in order[idx + 1:]))
           else:
               ok = False
@@ -144,7 +153,9 @@ jobs:
                         'an `unverified-apk-*` artifact may remain, for inspection only.')
           elif errors:
               reason = 'FAILED: required stage(s) failed or were cancelled: ' + ', '.join(errors) + '.'
-          elif exhausted or stage_result('part-08') == 'success':
+          elif completed and not valid_artifact_id(stage_output(completed[0], 'apk-id')):
+              reason = f'FAILED: `{completed[0]}` reported completion without a confirmed APK artifact.'
+          elif exhausted:
               reason = 'FAILED: prepare and all 8 build stages ran without finishing; stage budget was exhausted.'
           else:
               reason = 'FAILED: no stage produced a validly completed APK. Inspect stage logs.'

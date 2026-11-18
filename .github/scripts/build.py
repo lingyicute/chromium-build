@@ -264,10 +264,7 @@ def main():
     stage = os.environ.get('STAGE', '')
     if not re.fullmatch(r'0[0-8]', stage):
         raise SystemExit(f'Invalid STAGE: {stage!r}')
-    final_raw = os.environ.get('FINAL_STAGE', 'false')
-    if final_raw not in ('true', 'false') or (stage == '00' and final_raw == 'true'):
-        raise SystemExit(f'Invalid FINAL_STAGE: {final_raw!r}')
-    final_stage = final_raw == 'true'
+    final_stage = stage == '08'
 
     root = Path(os.environ['CR_ROOT'])
     raw_started = (Path(os.environ['RUNNER_TEMP']) / 'chromium-job-start').read_text(encoding='utf-8').strip()

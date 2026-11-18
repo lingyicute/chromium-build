@@ -22,6 +22,7 @@
     build.py                 # 按 job 截止点分配编译预算，监督 Ninja 进程会话
     build.sh                 # 编译日志
     release.sh               # APK 验签与产物整理
+    confirm-upload.sh        # 确认成功上传返回了可安全解析的 artifact ID
 config/
   args.gn
   depot_tools_revision.txt
@@ -62,7 +63,7 @@ part-01 → part-02 → … → part-08
   ├─ 完成：验证 APK 签名并上传产物，跳过后续分段
   └─ 检查点下载/上传与 APK 上传失败时各自动重试一次
        ↓
-result：只有确实完成且必要 job 未失败才算成功
+result：只接受连续的成功检查点，以及已确认上传 APK 的成功段
 ```
 
 每个 job 上限 350 分钟。在首个输入校验步骤中、checkout 前记录单调时钟（`CLOCK_BOOTTIME`），常规编译段（含 `prepare`，源码同步越慢其编译时间越少）受到“本 job 开始后第 260 分钟停止”的预算约束，为导出和上传留出约 90 分钟；最终段 `part-08` 无后续消费者，跳过检查点打包上传并将截止点放宽至第 325 分钟，仅保留时间用于 APK 验签与产物上传。每段编译时长即截止点减去同步/下载/恢复耗时，不另设固定时间片上限。

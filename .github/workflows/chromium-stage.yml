@@ -4,7 +4,7 @@ on:
   workflow_call:
     inputs:
       stage:
-        description: "'00' fetches and configures a fresh tree; '01'-'08' resume a checkpoint."
+        description: "'00' prepares; '01'-'07' continue; '08' is the final attempt."
         required: true
         type: string
       artifact-id:
@@ -17,15 +17,13 @@ on:
         required: false
         type: string
         default: ''
-      final:
-        required: false
-        type: boolean
-        default: false
     outputs:
       status:
         value: ${{ jobs.build.outputs.status }}
       artifact-id:
         value: ${{ jobs.build.outputs.artifact-id }}
+      apk-id:
+        value: ${{ jobs.build.outputs.apk-id }}
       sha256:
         value: ${{ jobs.build.outputs.sha256 }}
 
@@ -38,7 +36,8 @@ jobs:
     timeout-minutes: 350
     outputs:
       status: ${{ steps.build.outputs.status }}
-      artifact-id: ${{ steps.upload-retry.outputs.artifact-id || steps.upload.outputs.artifact-id }}
+      artifact-id: ${{ steps.confirm-checkpoint.outputs.artifact-id }}
+      apk-id: ${{ steps.confirm-apk.outputs.artifact-id }}
       sha256: ${{ steps.pack.outputs.sha256 }}
     # Every step is time-boxed: continue-on-error tolerates a failure, not a hang,
     # and an unbounded step would run into the job limit and take the stage with it.
@@ -51,7 +50,6 @@ jobs:
           STAGE: ${{ inputs.stage }}
           ARTIFACT_ID: ${{ inputs.artifact-id }}
           EXPECTED_SHA256: ${{ inputs.sha256 }}
-          FINAL_STAGE: ${{ inputs.final }}
         run: |
           /usr/bin/python3 - <<'PY'
           import os, re, time
@@ -60,12 +58,13 @@ jobs:
           fresh = os.environ['STAGE'] == '00'
           for key, pattern in [
               ('STAGE', r'0[0-8]'),
-              ('ARTIFACT_ID', r'' if fresh else r'[1-9][0-9]*'),
+              ('ARTIFACT_ID', r'' if fresh else r'[1-9][0-9]{0,15}'),
               ('EXPECTED_SHA256', r'' if fresh else r'[0-9a-f]{64}'),
-              ('FINAL_STAGE', r'false' if fresh else r'true|false'),
           ]:
               if not re.fullmatch(pattern, os.environ[key]):
                   raise SystemExit('Invalid ' + key)
+          if not fresh and int(os.environ['ARTIFACT_ID']) > 9007199254740991:
+              raise SystemExit('ARTIFACT_ID exceeds the safe integer range')
           # Earliest user step: include checkout and setup in the same stage budget.
           start = int(time.clock_gettime(time.CLOCK_BOOTTIME))
           (Path(os.environ['RUNNER_TEMP']) / 'chromium-job-start').write_text(f'{start}\n')
@@ -137,7 +136,6 @@ jobs:
         timeout-minutes: 330
         env:
           STAGE: ${{ inputs.stage }}
-          FINAL_STAGE: ${{ inputs.final }}
         run: bash .github/scripts/build.sh
       - name: Verify APK signature and assemble output
         if: steps.build.outputs.status == 'completed'
@@ -159,7 +157,8 @@ jobs:
           compression-level: 0
           retention-days: 14
       - name: Retry the APK upload once
-        if: steps.build.outputs.status == 'completed' && steps.apk.outcome != 'success'
+        if: steps.build.outputs.status == 'completed' && (steps.apk.outcome != 'success' || !steps.apk.outputs.artifact-id)
+        id: apk-retry
         timeout-minutes: 4
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
@@ -169,6 +168,13 @@ jobs:
           if-no-files-found: error
           compression-level: 0
           retention-days: 14
+      - name: Confirm APK upload
+        if: steps.build.outputs.status == 'completed'
+        id: confirm-apk
+        timeout-minutes: 1
+        env:
+          TRANSFER_ID: ${{ (steps.apk-retry.outcome == 'success' && steps.apk-retry.outputs.artifact-id) || (steps.apk.outcome == 'success' && steps.apk.outputs.artifact-id) || '' }}
+        run: bash .github/scripts/confirm-upload.sh
       - name: Keep the unverified APK for inspection if a post-build step failed
         if: failure() && steps.build.outputs.status == 'completed'
         timeout-minutes: 4
@@ -180,12 +186,12 @@ jobs:
           compression-level: 0
           retention-days: 3
       - name: Destructively checkpoint unfinished build
-        if: steps.build.outputs.status == 'running' && !inputs.final
+        if: steps.build.outputs.status == 'running' && inputs.stage != '08'
         id: pack
         timeout-minutes: 45
         run: bash .github/scripts/pack.sh
       - name: Upload immutable checkpoint
-        if: steps.build.outputs.status == 'running' && !inputs.final
+        if: steps.build.outputs.status == 'running' && inputs.stage != '08'
         id: upload
         timeout-minutes: 35
         # pack.sh has already deleted the tree: without a second try, one failed
@@ -214,7 +220,7 @@ jobs:
           retention-days: 7
           if-no-files-found: ignore
       - name: Retry the checkpoint upload once (best effort within the job limit)
-        if: steps.build.outputs.status == 'running' && !inputs.final && steps.upload.outcome != 'success'
+        if: steps.build.outputs.status == 'running' && inputs.stage != '08' && (steps.upload.outcome != 'success' || !steps.upload.outputs.artifact-id)
         id: upload-retry
         timeout-minutes: 35
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
@@ -228,3 +234,10 @@ jobs:
           if-no-files-found: error
           retention-days: 3
           overwrite: false
+      - name: Confirm checkpoint upload
+        if: steps.build.outputs.status == 'running' && inputs.stage != '08'
+        id: confirm-checkpoint
+        timeout-minutes: 1
+        env:
+          TRANSFER_ID: ${{ (steps.upload-retry.outcome == 'success' && steps.upload-retry.outputs.artifact-id) || (steps.upload.outcome == 'success' && steps.upload.outputs.artifact-id) || '' }}
+        run: bash .github/scripts/confirm-upload.sh
