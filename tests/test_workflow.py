@@ -1036,6 +1036,41 @@ class Hardening(unittest.TestCase):
             with self.assertRaises(FileExistsError):
                 checkpoint._open_exclusive_wo(existing)
 
+    def test_checkpoint_rechecks_each_block_of_the_open_inode(self):
+        from unittest import mock
+
+        with tempfile.TemporaryDirectory() as tmp:
+            dest = Path(tmp)
+            sha, _, _ = checkpoint.pack_stream(dest, io.BytesIO(b'aaaabbbbcccc'), chunk_size=12)
+            orig_verify = checkpoint._verify_and_open
+
+            def change_same_size(path, entry):
+                result = orig_verify(path, entry)
+                with path.open('r+b') as fp:
+                    fp.seek(4)
+                    fp.write(b'BBBB')
+                return result
+
+            out = io.BytesIO()
+            with mock.patch.object(checkpoint, 'IO_BUFFER', 4), \
+                 mock.patch.object(checkpoint, '_verify_and_open', side_effect=change_same_size):
+                with self.assertRaisesRegex(ValueError, 'SHA-256 mismatch'):
+                    checkpoint.restore_stream(dest, sha, out)
+            self.assertEqual(out.getvalue(), b'aaaa')
+            self.assertTrue((dest / 'tree.part-00000').is_file())
+
+    def test_checkpoint_does_not_block_opening_special_files(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            fifo = Path(tmp) / 'fifo'
+            os.mkfifo(fifo)
+            p = subprocess.run(
+                [sys.executable, '-c',
+                 'import checkpoint, sys; checkpoint._open_regular_ro(sys.argv[1])', str(fifo)],
+                cwd=ROOT / '.github/scripts', capture_output=True, text=True, timeout=3,
+            )
+            self.assertNotEqual(p.returncode, 0)
+            self.assertIn(checkpoint.BAD_LAYOUT, p.stderr)
+
     def test_supervisor_lingering_ninja_and_budget_guards(self):
         from unittest import mock
 

@@ -60,7 +60,8 @@ def parts(directory):
 
 
 def _open_regular_ro(path):
-    flags = os.O_RDONLY | getattr(os, 'O_NOFOLLOW', 0)
+    # If a regular file was replaced by a FIFO, fail fstat instead of blocking.
+    flags = os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW
     try:
         fd = os.open(path, flags)
     except OSError as exc:
@@ -73,21 +74,6 @@ def _open_regular_ro(path):
     except BaseException:
         os.close(fd)
         raise
-
-
-def sha256_file(path):
-    h = hashlib.sha256()
-    buf = bytearray(IO_BUFFER)
-    view = memoryview(buf)
-    size = 0
-    with _open_regular_ro(path) as f:
-        while True:
-            n = f.readinto(buf)
-            if not n:
-                break
-            h.update(view[:n])
-            size += n
-    return h.hexdigest(), size
 
 
 def _manifest_bytes(directory):
@@ -121,9 +107,12 @@ def manifest(directory, expected):
         except OSError as exc:
             raise ValueError(BAD_LAYOUT) from exc
         # A wrong size (e.g. a truncated download) is caught before any byte is streamed.
-        if not m or m[3] != path.name or not stat.S_ISREG(st.st_mode) or int(m[2]) != st.st_size:
+        if not m or m[3] != path.name or not stat.S_ISREG(st.st_mode):
             raise ValueError(BAD_LAYOUT)
-        entries.append((path, (m[1], int(m[2]))))
+        size = int(m[2])
+        if size != st.st_size or size > CHUNK_SIZE:
+            raise ValueError(BAD_LAYOUT)
+        entries.append((path, (m[1], size)))
     return entries
 
 
@@ -131,28 +120,34 @@ def _verify_and_open(path, entry):
     expected_digest, expected_size = entry
     f = _open_regular_ro(path)
     try:
+        if os.fstat(f.fileno()).st_size != expected_size:
+            raise ValueError(MISMATCH)
         h = hashlib.sha256()
-        buf = bytearray(IO_BUFFER)
-        view = memoryview(buf)
-        size = 0
-        while True:
-            n = f.readinto(buf)
-            if not n:
-                break
-            h.update(view[:n])
-            size += n
-        if size != expected_size or not hmac.compare_digest(h.hexdigest(), expected_digest):
+        view = memoryview(bytearray(IO_BUFFER))
+        remaining = expected_size
+        prefixes = []
+        while remaining:
+            block = view[:min(remaining, len(view))]
+            if f.readinto(block) != len(block):
+                raise ValueError(MISMATCH)
+            h.update(block)
+            # These prefix digests are trusted only if the whole part matches
+            # the authenticated manifest. Recheck each buffered block before
+            # streaming: an open fd pins the inode, not its contents.
+            prefixes.append(h.copy().digest())
+            remaining -= len(block)
+        if f.read(1) or not hmac.compare_digest(h.hexdigest(), expected_digest):
             raise ValueError(MISMATCH)
         f.seek(0)
-        return f
+        return f, prefixes
     except BaseException:
         f.close()
         raise
 
 
 def verify_part(path, entry):
-    with _verify_and_open(path, entry):
-        pass
+    f, _ = _verify_and_open(path, entry)
+    f.close()
 
 
 def digest(directory):
@@ -179,14 +174,14 @@ def _write_all(stream, data):
     written = 0
     while written < len(view):
         n = stream.write(view[written:])
-        if not n:
+        if n is None or not 0 < n <= len(view) - written:
             raise OSError('Short write to checkpoint stream')
         written += n
 
 
 def pack_stream(directory, in_stream, chunk_size=CHUNK_SIZE):
-    if isinstance(chunk_size, bool) or not isinstance(chunk_size, int) or chunk_size <= 0:
-        raise ValueError('chunk_size must be positive')
+    if isinstance(chunk_size, bool) or not isinstance(chunk_size, int) or not 1 <= chunk_size <= CHUNK_SIZE:
+        raise ValueError(f'chunk_size must be between 1 and {CHUNK_SIZE} bytes')
     dest = _require_real_dir(directory, 'Checkpoint output directory does not exist')
     if any(dest.iterdir()):
         raise ValueError('Checkpoint output must be empty')
@@ -203,8 +198,10 @@ def pack_stream(directory, in_stream, chunk_size=CHUNK_SIZE):
             room = chunk_size - written if out is not None else chunk_size
             read_slice = view[:min(len(buf), room)]
             n = in_stream.readinto(read_slice)
-            if not n:
+            if n == 0:
                 break
+            if n is None or not 0 < n <= len(read_slice):
+                raise OSError('Invalid read from checkpoint stream')
             if out is None:
                 if len(lines) >= MAX_PARTS:
                     raise ValueError('Checkpoint exceeded maximum part count')
@@ -258,35 +255,39 @@ def restore_stream(directory, expected, out_stream):
     total_bytes = 0
     # Unlink each compressed chunk after it is consumed to reduce peak disk.
     # Downstream failure loses this disposable local copy, NOT the artifact.
-    # zstd/tar never see an unverified byte: a part is streamed only after its
-    # own check. The next part is hashed meanwhile on a helper thread, so that
-    # disk read overlaps extraction and the part is streamed from the page cache.
+    # Check the next part in the background. The current part is read a second
+    # time (usually from the cache); rehash it block by block before writing.
     with ThreadPoolExecutor(max_workers=1) as pool:
         next_check = pool.submit(_verify_and_open, *entries[0])
         try:
             for n, (path, (_, expected_size)) in enumerate(entries):
-                f = next_check.result()
-                next_check = (pool.submit(_verify_and_open, *entries[n + 1])
-                              if n + 1 < len(entries) else None)
-                part_bytes = 0
+                f, prefixes = next_check.result()
+                next_check = None
                 with f:
-                    while True:
-                        size = f.readinto(buf)
-                        if not size:
-                            break
-                        if part_bytes + size > expected_size:
+                    if n + 1 < len(entries):
+                        next_check = pool.submit(_verify_and_open, *entries[n + 1])
+                    if os.fstat(f.fileno()).st_size != expected_size:
+                        raise ValueError(MISMATCH)
+                    h = hashlib.sha256()
+                    remaining = expected_size
+                    for prefix in prefixes:
+                        block = view[:min(remaining, len(view))]
+                        if f.readinto(block) != len(block):
                             raise ValueError(MISMATCH)
-                        _write_all(out_stream, view[:size])
-                        part_bytes += size
-                if part_bytes != expected_size:
-                    raise ValueError(MISMATCH)
-                total_bytes += part_bytes
+                        h.update(block)
+                        if not hmac.compare_digest(h.copy().digest(), prefix):
+                            raise ValueError(MISMATCH)
+                        _write_all(out_stream, block)
+                        remaining -= len(block)
+                    if remaining or f.read(1):
+                        raise ValueError(MISMATCH)
+                total_bytes += expected_size
                 out_stream.flush()
                 path.unlink()
         finally:
             if next_check is not None:
                 try:
-                    next_check.result().close()
+                    next_check.result()[0].close()
                 except Exception:
                     pass
     (Path(directory) / MANIFEST).unlink()
