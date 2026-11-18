@@ -55,26 +55,34 @@ def inspect_signer(log, pin):
 
 def inspect_zip(apk_path):
     with zipfile.ZipFile(apk_path) as zf:
-        names = zf.namelist()
-        if len(set(names)) != len(names):
-            raise ValueError('APK contains duplicate ZIP entry names')
-        names = {info.filename for info in zf.infolist() if not info.is_dir() and info.file_size > 0}
-        if 'AndroidManifest.xml' not in names:
-            raise ValueError('APK missing non-empty AndroidManifest.xml')
-        if 'classes.dex' not in names:
-            raise ValueError('APK missing non-empty root classes.dex')
+        entries = zf.infolist()
+        names = {info.filename: info for info in entries}
+        if len(names) != len(entries) or any(info.filename != info.orig_filename for info in entries):
+            raise ValueError('APK contains duplicate or ambiguous ZIP entry names')
+        for name in ('AndroidManifest.xml', 'classes.dex'):
+            if name not in names or names[name].file_size <= 0:
+                raise ValueError(f'APK missing non-empty root {name}')
         with zf.open('classes.dex') as dex:
-            if not re.fullmatch(rb'dex\n[0-9]{3}\x00', dex.read(8)):
-                raise ValueError('APK root classes.dex has an invalid DEX header')
-        libs = sorted(name for name in names if re.fullmatch(r'lib/arm64-v8a/[^/]+\.so', name))
+            header = dex.read(0x78)
+        file_size = int.from_bytes(header[32:36], 'little')
+        header_size = int.from_bytes(header[36:40], 'little')
+        if (not re.fullmatch(rb'dex\n[0-9]{3}\x00', header[:8]) or header_size not in (0x70, 0x78)
+                or len(header) < header_size or not header_size <= file_size <= names['classes.dex'].file_size
+                or header[40:44] != b'\x78\x56\x34\x12'):
+            raise ValueError('APK root classes.dex has an invalid or truncated DEX header')
+
+        libs = sorted(name for name in names if re.fullmatch(r'lib/[^/]+/[^/]+\.so', name))
         if not libs:
             raise ValueError('APK missing non-empty arm64-v8a native library')
         for name in libs:
+            if not name.startswith('lib/arm64-v8a/'):
+                raise ValueError(f'APK contains a native library outside arm64-v8a: {name!r}')
             with zf.open(name) as lib:
-                header = lib.read(20)
-            # ELF64 little-endian, ET_DYN (shared object), EM_AARCH64 (183).
-            if header[:7] != b'\x7fELF\x02\x01\x01' or header[16:20] != b'\x03\x00\xb7\x00':
-                raise ValueError(f'APK has a non-AArch64 shared object in arm64-v8a: {name!r}')
+                header = lib.read(64)
+            # Require a complete ELF64 little-endian ET_DYN header for EM_AARCH64.
+            if (len(header) != 64 or header[:7] != b'\x7fELF\x02\x01\x01'
+                    or header[16:24] != b'\x03\x00\xb7\x00\x01\x00\x00\x00' or header[52:54] != b'\x40\x00'):
+                raise ValueError(f'APK has a truncated ELF header or a non-AArch64 shared object: {name!r}')
 
 
 def inspect_badging(aapt2, apk_path, locked_version):
@@ -101,8 +109,9 @@ def inspect_badging(aapt2, apk_path, locked_version):
     abi_lines = re.findall(r'^native-code:[ \t]*([^\r\n]+)$', badging, re.M)
     if not abi_lines:
         raise ValueError('aapt2 output missing native-code line')
-    if len(abi_lines) != 1 or 'arm64-v8a' not in re.findall(r"'([^']+)'", abi_lines[0]):
-        raise ValueError('APK native-code missing an unambiguous arm64-v8a declaration')
+    if (len(abi_lines) != 1 or not re.fullmatch(r"[ \t]*'arm64-v8a'[ \t]*", abi_lines[0])
+            or re.search(r'^alt-native-code:', badging, re.M)):
+        raise ValueError('APK native-code must declare only arm64-v8a')
     min_sdk = re.search(r"^sdkVersion:'([^']+)'", badging, re.M)
     target_sdk = re.search(r"^targetSdkVersion:'([^']+)'", badging, re.M)
     return dict(package=expected_package, version_code=attrs['versionCode'],

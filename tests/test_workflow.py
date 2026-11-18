@@ -950,8 +950,9 @@ class Hardening(unittest.TestCase):
         script = ROOT / '.github/scripts/apk.py'
         pin = ROOT / 'config/debug_signer_sha256.txt'
         fingerprint = pin.read_text().strip()
-        elf = b'\x7fELF\x02\x01\x01' + bytes(9) + b'\x03\x00\xb7\x00'
-        dex = b'dex\n039\x00'
+        elf = (b'\x7fELF\x02\x01\x01' + bytes(9) + b'\x03\x00\xb7\x00\x01\x00\x00\x00'
+               + bytes(28) + b'\x40\x00' + bytes(10))
+        dex = b'dex\n039\x00' + bytes(24) + b'\x70\x00\x00\x00' * 2 + b'\x78\x56\x34\x12' + bytes(68)
 
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -965,11 +966,14 @@ class Hardening(unittest.TestCase):
             signature = root / 'signature.txt'
             valid_signer = f'Number of signers: 1\nSigner #1 certificate SHA-256 digest: {fingerprint}\n'
 
-            def apk_fixture(dex_name='classes.dex', lib_name='lib/arm64-v8a/libchrome.so', lib=elf):
+            def apk_fixture(dex_name='classes.dex', dex_data=dex, lib_name='lib/arm64-v8a/libchrome.so',
+                            lib=elf, extra_lib=None):
                 with zipfile.ZipFile(apk, 'w') as zf:
                     zf.writestr('AndroidManifest.xml', b'manifest')
-                    zf.writestr(dex_name, dex)
+                    zf.writestr(dex_name, dex_data)
                     zf.writestr(lib_name, lib)
+                    if extra_lib:
+                        zf.writestr(extra_lib, elf)
 
             def run_check(badging, signer=valid_signer, tool=aapt2):
                 signature.write_text(signer)
@@ -990,6 +994,8 @@ class Hardening(unittest.TestCase):
             for badging, message in ((good + '\napplication-debuggable', 'debuggable'),
                                      (good.split('\nnative-code:')[0], 'missing native-code'),
                                      (good.replace('arm64-v8a', 'armeabi-v7a'), 'arm64-v8a'),
+                                     (good + " 'armeabi-v7a'", 'only arm64-v8a'),
+                                     (good + "\nalt-native-code: 'x86_64'", 'only arm64-v8a'),
                                      (good.replace('org.chromium.chrome', 'org.example.app'), 'package name'),
                                      (good.replace('158.0.8127.36', '158.0.8127.99'), 'versionName mismatch'),
                                      (good.replace("versionCode='1234' ", ''), 'positive versionCode')):
@@ -1009,7 +1015,10 @@ class Hardening(unittest.TestCase):
 
             for changes, message in (({'dex_name': 'assets/nested.dex'}, 'classes.dex'),
                                      ({'lib_name': 'lib/arm64-v8a/nested/libchrome.so'}, 'native library'),
-                                     ({'lib': elf[:-2] + b'\x3e\x00'}, 'non-AArch64 shared object')):
+                                     ({'dex_data': dex[:8]}, 'truncated DEX header'),
+                                     ({'extra_lib': 'lib/armeabi-v7a/libchrome.so'}, 'outside arm64-v8a'),
+                                     ({'lib': elf[:20]}, 'truncated ELF header'),
+                                     ({'lib': elf[:18] + b'\x3e\x00' + elf[20:]}, 'non-AArch64 shared object')):
                 apk_fixture(**changes)
                 p = run_check(good)
                 self.assertNotEqual(p.returncode, 0)
