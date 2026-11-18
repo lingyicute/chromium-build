@@ -305,17 +305,10 @@ class Checkpoint(unittest.TestCase):
         self.assertEqual(len(self.names()), 3)
 
     def test_tar_metadata_round_trip(self):
-        # Runs pack.sh's own chmod, socket and tar commands (real GNU tar, no compression) on a
-        # tree with read-only and inaccessible nested dirs and a stale Unix socket.
+        # Use the production tar helpers with real files, without touching /mnt.
         import socket
 
-        pack = (ROOT / '.github/scripts/pack.sh').read_text()
-        chmod_pass = 'find "$CR_ROOT" -type d ! -perm -u+rwx -exec chmod u+rwx {} \\;'
-        socket_pass = 'find "$CR_ROOT" -mindepth 1 -type s -delete'
-        tar_cmd = ('tar --format=posix --pax-option=delete=atime,delete=ctime '
-                   '--remove-files -cf - -- "${entries[@]}"')
-        for command in (chmod_pass, socket_pass, tar_cmd):
-            self.assertIn(command, pack)
+        scripts = ROOT / '.github/scripts'
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             src = root / 'src'
@@ -347,16 +340,14 @@ class Checkpoint(unittest.TestCase):
             with socket.socket(socket.AF_UNIX) as sock:
                 sock.bind(str(src / 'run/stale.sock'))
             archive = root / 'test.tar'
-            subprocess.run(
-                ['bash', '-euc',
-                 f'{chmod_pass}\n{socket_pass}\n'
-                 'cd "$CR_ROOT" && shopt -s dotglob nullglob && entries=(*) && '
-                 f'{tar_cmd} > "$1"',
-                 '_', str(archive)],
-                env=dict(os.environ, CR_ROOT=str(src)), check=True)
+            env = dict(os.environ, RUNNER_TEMP=tmp)
+            harness = 'source "$1/common.sh"; source "$1/relay.sh"; '
+            subprocess.run(['bash', '-euc', harness + 'archive_relay_tree "$2" > "$3"',
+                            '_', str(scripts), str(src), str(archive)], env=env, check=True, timeout=10)
             self.assertTrue(src.exists())
             self.assertEqual(list(src.iterdir()), [])
-            subprocess.run(['tar', '--no-same-owner', '-xpf', str(archive), '-C', str(src)], check=True)
+            subprocess.run(['bash', '-euc', harness + 'extract_relay_tree "$2" < "$3"',
+                            '_', str(scripts), str(src), str(archive)], env=env, check=True, timeout=10)
             self.assertEqual((src / '.ninja_log').stat().st_mtime_ns, ns)
             self.assertEqual((src / '.ninja_log').read_text(), 'state')
             self.assertTrue((src / 'link').is_symlink())

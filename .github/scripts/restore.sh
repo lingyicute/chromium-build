@@ -3,6 +3,7 @@ source "$(dirname "$0")/common.sh"
 # Verify restored tree using only OS tools, never restored depot_tools wrappers.
 export PATH="/usr/bin:/bin:/usr/sbin:/sbin"
 source "$(dirname "$0")/runner.sh"
+source "$(dirname "$0")/relay.sh"
 require_hosted_runner
 require_relay_mount
 require_relay_directory "$CR_ROOT"
@@ -10,7 +11,7 @@ require_relay_directory "$CR_TRANSFER"
 require_relay_directory "$CR_TRANSFER/checkpoint"
 require_empty_directory "$CR_ROOT"
 "$CR_PYTHON" "$GITHUB_WORKSPACE/.github/scripts/checkpoint.py" restore-stream "$CR_TRANSFER/checkpoint" \
-  | zstd -d -c | tar --no-same-owner -xpf - -C "$CR_ROOT"
+  | zstd -d -c | extract_relay_tree "$CR_ROOT"
 "$CR_PYTHON" "$GITHUB_WORKSPACE/.github/scripts/source_state.py" verify-restore
 # No gclient sync, runhooks, or gn gen here: keep all build inputs and mtimes.
 rmdir "$CR_TRANSFER/checkpoint"

@@ -21,4 +21,6 @@ jobs:
           persist-credentials: false
           fetch-depth: 1
       - name: Run tests on the image and system Python the build stages use
-        run: /usr/bin/python3 -m unittest discover -s tests -v
+        run: |
+          command -v zstd
+          /usr/bin/python3 -m unittest discover -s tests -v

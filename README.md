@@ -19,6 +19,7 @@
     checkpoint.py            # 分块清单摘要、逐块先验证后流式恢复
     pack.sh                  # 破坏性导出检查点（仅用于临时 VM）
     restore.sh               # 恢复并检查仓库/运行/提交/前序阶段
+    relay.sh                 # 导出与恢复共享的 tar 操作
     source_state.py          # 源码锁、Git 工作树、版本与续编历史校验
     build.py                 # 按 job 截止点分配编译预算，监督 Ninja 进程会话
     build.sh                 # 编译日志
