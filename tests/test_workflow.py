@@ -1195,8 +1195,10 @@ class Hardening(unittest.TestCase):
             (cr / 'depot_tools').mkdir(parents=True)
             for repo in (cr / 'src', cr / 'depot_tools'):
                 subprocess.run(['git', 'init', '-q', str(repo)], check=True)
+                (repo / 'tracked.txt').write_text('locked\n')
+                subprocess.run(['git', '-C', str(repo), 'add', 'tracked.txt'], check=True)
                 subprocess.run(['git', '-C', str(repo), '-c', 'user.name=t', '-c', 'user.email=t@t',
-                                'commit', '-q', '--allow-empty', '-m', 'init'], check=True)
+                                'commit', '-q', '-m', 'init'], check=True)
             src_sha = subprocess.check_output(['git', '-C', str(cr / 'src'), 'rev-parse', 'HEAD'], text=True).strip()
             dep_head = subprocess.check_output(['git', '-C', str(cr / 'depot_tools'), 'rev-parse', 'HEAD'], text=True).strip()
             ws = Path(tmp) / 'ws'
@@ -1204,6 +1206,7 @@ class Hardening(unittest.TestCase):
             (ws / 'config/depot_tools_revision.txt').write_text(dep_head + '\n')
             (ws / 'config/args.gn').write_bytes(b'is_debug = false\n')
             (cr / 'src/out/Release/args.gn').write_bytes(b'is_debug = false\n')
+            (cr / 'metadata/args.gn').write_bytes(b'is_debug = false\n')
             (cr / 'src/out/Release/build.ninja').write_text('')
             for rel in ('src/buildtools/linux64/gn', 'src/third_party/ninja/ninja'):
                 tool = cr / rel
@@ -1218,6 +1221,10 @@ class Hardening(unittest.TestCase):
                 'version': '158.0.8127.36',
             }
             (cr / 'metadata/build-lock.json').write_text(json.dumps(lock))
+            snapshot = cr / 'metadata/chromiumdash.json'
+            release = dict(channel='Stable', platform='Android', version=lock['version'],
+                           hashes={'chromium': src_sha})
+            snapshot.write_text(json.dumps([release]))
             env = dict(os.environ, CR_ROOT=str(cr), GITHUB_WORKSPACE=str(ws),
                        GITHUB_REPOSITORY='o/r', GITHUB_RUN_ID='1', GITHUB_SHA='c' * 40, STAGE='01')
             prior = dict(stage='00', status='running', final_stage=False, run_attempt='1')
@@ -1225,6 +1232,27 @@ class Hardening(unittest.TestCase):
             records.write_text(json.dumps(prior) + '\n')
             p = subprocess.run(command, env=env, capture_output=True, text=True)
             self.assertEqual(p.returncode, 0, p.stderr)
+
+            def assert_rejects(message):
+                result = subprocess.run(command, env=env, capture_output=True, text=True)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn(message, result.stderr)
+
+            snapshot.write_text(json.dumps([{**release, 'version': '158.0.8127.37'}]))
+            assert_rejects('ChromiumDash snapshot does not match')
+            snapshot.write_text(json.dumps([release]))
+            (cr / 'metadata/args.gn').write_text('is_debug = true\n')
+            assert_rejects('GN arguments changed: metadata/args.gn')
+            (cr / 'metadata/args.gn').write_bytes(b'is_debug = false\n')
+            tracked_src = cr / 'src/tracked.txt'
+            tracked_src.write_text('edited without changing HEAD\n')
+            assert_rejects('src has tracked changes')
+            tracked_src.write_text('locked\n')
+            (cr / 'depot_tools/tracked.txt').write_text('staged edit\n')
+            subprocess.run(['git', '-C', str(cr / 'depot_tools'), 'add', 'tracked.txt'], check=True)
+            assert_rejects('depot_tools has tracked changes')
+            subprocess.run(['git', '-C', str(cr / 'depot_tools'), 'restore', '--source=HEAD',
+                            '--staged', '--worktree', 'tracked.txt'], check=True)
 
             p = subprocess.run(command, env={**env, 'STAGE': '02'}, capture_output=True, text=True)
             self.assertNotEqual(p.returncode, 0)
