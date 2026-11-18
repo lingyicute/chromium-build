@@ -305,7 +305,17 @@ class Checkpoint(unittest.TestCase):
         self.assertEqual(len(self.names()), 3)
 
     def test_tar_metadata_round_trip(self):
-        # Tests real GNU tar without compression, including nested read-only dirs.
+        # Runs pack.sh's own chmod, socket and tar commands (real GNU tar, no compression) on a
+        # tree with read-only and inaccessible nested dirs and a stale Unix socket.
+        import socket
+
+        pack = (ROOT / '.github/scripts/pack.sh').read_text()
+        chmod_pass = 'find "$CR_ROOT" -type d ! -perm -u+rwx -exec chmod u+rwx {} \\;'
+        socket_pass = 'find "$CR_ROOT" -mindepth 1 -type s -delete'
+        tar_cmd = ('tar --format=posix --pax-option=delete=atime,delete=ctime '
+                   '--remove-files -cf - -- "${entries[@]}"')
+        for command in (chmod_pass, socket_pass, tar_cmd):
+            self.assertIn(command, pack)
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             src = root / 'src'
@@ -328,16 +338,22 @@ class Checkpoint(unittest.TestCase):
             ro_child.chmod(0o555)
             os.utime(ro_parent, ns=(ns, ns))
             ro_parent.chmod(0o555)
+            locked = src / 'locked'
+            (locked / 'inner').mkdir(parents=True)
+            (locked / 'inner/secret.txt').write_text('hidden')
+            (locked / 'inner').chmod(0o000)
+            locked.chmod(0o000)
+            (src / 'run').mkdir()
+            with socket.socket(socket.AF_UNIX) as sock:
+                sock.bind(str(src / 'run/stale.sock'))
             archive = root / 'test.tar'
-            # Same archive form as pack.sh: chmod u+w on read-only dirs, then tar entries.
             subprocess.run(
-                ['bash', '-c',
-                 'find "$1" -mindepth 1 -type d ! -perm -u+w -exec chmod u+w {} + && '
-                 'cd "$1" && shopt -s dotglob nullglob && entries=(*) && '
-                 'tar --format=posix --pax-option=delete=atime,delete=ctime '
-                 '--remove-files -cf "$2" -- "${entries[@]}"',
-                 '_', str(src), str(archive)],
-                check=True)
+                ['bash', '-euc',
+                 f'{chmod_pass}\n{socket_pass}\n'
+                 'cd "$CR_ROOT" && shopt -s dotglob nullglob && entries=(*) && '
+                 f'{tar_cmd} > "$1"',
+                 '_', str(archive)],
+                env=dict(os.environ, CR_ROOT=str(src)), check=True)
             self.assertTrue(src.exists())
             self.assertEqual(list(src.iterdir()), [])
             subprocess.run(['tar', '--no-same-owner', '-xpf', str(archive), '-C', str(src)], check=True)
@@ -349,6 +365,11 @@ class Checkpoint(unittest.TestCase):
             self.assertEqual(restored_ro.stat().st_mtime_ns, ns)
             self.assertEqual(restored_ro.stat().st_mode & 0o777, 0o444)
             self.assertEqual(restored_ro.read_text(), 'immutable')
+            # chmod and the removal of archived children must not disturb directory mtimes.
+            self.assertEqual((src / 'ro_parent/ro_child').stat().st_mtime_ns, ns)
+            self.assertEqual((src / 'ro_parent').stat().st_mtime_ns, ns)
+            self.assertEqual((src / 'locked/inner/secret.txt').read_text(), 'hidden')
+            self.assertEqual(list((src / 'run').iterdir()), [])
 
 
 class Deadline(unittest.TestCase):
