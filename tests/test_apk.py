@@ -1,13 +1,20 @@
 """Offline tests for the local APK publication boundary."""
+from contextlib import contextmanager
+import importlib.util
 from pathlib import Path
 import os
 import subprocess
 import sys
 import tempfile
+from types import SimpleNamespace
 import unittest
+from unittest import mock
 
 
 SCRIPT = Path(__file__).resolve().parents[1] / '.github/scripts/apk.py'
+SPEC = importlib.util.spec_from_file_location('apk', SCRIPT)
+apk = importlib.util.module_from_spec(SPEC)
+SPEC.loader.exec_module(apk)
 
 
 class StageApk(unittest.TestCase):
@@ -32,6 +39,28 @@ class StageApk(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.source.write_bytes(b'changed')
         self.assertEqual(self.destination.read_bytes(), b'chromium build output')
+
+    def test_copy_is_bounded_and_detects_growth(self):
+        original = b'APK bytes'
+        self.source.write_bytes(original)
+        fdopen = os.fdopen
+
+        @contextmanager
+        def growing_source(fd, mode):
+            with fdopen(fd, mode) as source:
+                def read(size):
+                    self.assertEqual(size, len(original))
+                    with self.source.open('ab') as writer:
+                        writer.write(b'in progress')
+                    return source.read(size)
+
+                yield SimpleNamespace(read=read, fileno=source.fileno)
+
+        with mock.patch.object(apk.os, 'fdopen', growing_source):
+            with self.assertRaisesRegex(ValueError, 'changed while staging'):
+                apk.stage_apk(self.root, self.source, self.destination)
+        self.assertEqual(self.source.read_bytes(), original + b'in progress')
+        self.assertFalse(self.destination.exists())
 
     def test_unsafe_and_empty_files_are_not_staged(self):
         for make in (lambda p: p.touch(), os.mkfifo, lambda p: p.symlink_to('/dev/null')):

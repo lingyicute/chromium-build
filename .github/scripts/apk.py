@@ -4,7 +4,6 @@ import json
 import os
 from pathlib import Path
 import re
-import shutil
 import stat
 import subprocess
 import sys
@@ -25,11 +24,17 @@ def stage_apk(root, source, destination):
         # A diagnostic upload must not find a partial file if this step fails.
         with tempfile.TemporaryDirectory(dir=destination.parent) as tmp:
             candidate = Path(tmp) / destination.name
+            remaining = before.st_size
             with candidate.open('xb') as dst:
-                shutil.copyfileobj(src, dst, length=1024 * 1024)
-                copied = dst.tell()
+                # Do not chase EOF on a file that is concurrently being extended.
+                while remaining:
+                    block = src.read(min(remaining, 1024 * 1024))
+                    if not block:
+                        break
+                    dst.write(block)
+                    remaining -= len(block)
             after = os.fstat(src.fileno())
-            if (copied != before.st_size or after.st_size != before.st_size
+            if (remaining or after.st_size != before.st_size
                     or after.st_mtime_ns != before.st_mtime_ns or after.st_ctime_ns != before.st_ctime_ns):
                 raise ValueError('ChromePublic.apk changed while staging')
             candidate.chmod(0o400)
