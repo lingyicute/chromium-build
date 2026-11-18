@@ -116,6 +116,26 @@ class Resolution(unittest.TestCase):
         with self.assertRaises(ValueError):
             resolve.fetch_release_json(attempts=1, retry_delay=0.0, opener=opener)
 
+    def test_resolution_rejects_duplicate_json_fields(self):
+        with self.assertRaisesRegex(ValueError, 'Duplicate field'):
+            resolve.parse_release_json(b'[{"hashes":{"chromium":"a","chromium":"b"}}]')
+
+    def test_resolution_content_length_has_one_unambiguous_source(self):
+        from email.message import Message
+
+        response = _FakeResponse(b'[]')
+        response.headers = Message()
+        response.headers['Content-Length'] = '000000002'
+        self.assertEqual(resolve.fetch_release_json(opener=_FakeOpener([response])), b'[]')
+        response.headers['Content-Length'] = '3'
+        with self.assertRaisesRegex(ValueError, 'Multiple.*Content-Length'):
+            resolve.fetch_release_json(opener=_FakeOpener([response]))
+        del response.headers['Content-Length']
+        response.headers['Content-Length'] = '2'
+        response.headers['Transfer-Encoding'] = 'chunked'
+        with self.assertRaisesRegex(ValueError, 'both Content-Length and Transfer-Encoding'):
+            resolve.fetch_release_json(opener=_FakeOpener([response]))
+
 
 class Checkpoint(unittest.TestCase):
     PARTS = [b'firsts', b'econd']

@@ -15,6 +15,7 @@ import urllib.parse
 import urllib.request
 
 URL = 'https://chromiumdash.appspot.com/fetch_releases?channel=Stable&platform=Android&num=1'
+SOURCE = 'https://chromium.googlesource.com/chromium/src.git'
 MAX_BYTES = 1024 * 1024
 FETCH_ATTEMPTS = 3
 RETRY_BASE_SECONDS = 2.0
@@ -93,14 +94,21 @@ def _retry_delay(attempt, retry_delay, headers=None, now=None):
 
 
 def _content_length(headers):
+    # http.client's .get() returns only the first header. Do not silently
+    # accept two lengths or an ambiguous transfer/content length combination.
+    if hasattr(headers, 'get_all') and len(headers.get_all('Content-Length', [])) > 1:
+        raise ValueError('Multiple ChromiumDash Content-Length headers')
     raw_len = _header_value(headers, 'Content-Length')
     if raw_len is None:
         return None
+    if _header_value(headers, 'Transfer-Encoding') is not None:
+        raise ValueError('ChromiumDash returned both Content-Length and Transfer-Encoding')
     if not isinstance(raw_len, str):
         raise ValueError('Invalid ChromiumDash Content-Length')
     text = raw_len.strip()
     if not re.fullmatch(r'[0-9]+', text):
         raise ValueError('Invalid ChromiumDash Content-Length')
+    text = text.lstrip('0') or '0'
     if len(text) > len(str(MAX_BYTES)) or int(text) > MAX_BYTES:
         raise ValueError('Oversized response')
     return int(text)
@@ -110,7 +118,15 @@ def parse_release_json(raw):
     def _reject_constant(token):
         raise ValueError(f'Invalid JSON constant: {token}')
 
-    return json.loads(raw.decode('utf-8'), parse_constant=_reject_constant)
+    def _unique_object(pairs):
+        obj = {}
+        for key, value in pairs:
+            if key in obj:
+                raise ValueError('Duplicate field in JSON object')
+            obj[key] = value
+        return obj
+
+    return json.loads(raw.decode('utf-8'), parse_constant=_reject_constant, object_pairs_hook=_unique_object)
 
 
 def validate_run_metadata(repository, workflow_sha, run_id):
@@ -204,7 +220,7 @@ def main():
     raw = fetch_release_json()
     version, revision = validate(parse_release_json(raw))
     lock = dict(version=version, chromium_revision=revision, depot_tools_revision=depot,
-                source='https://chromium.googlesource.com/chromium/src.git',
+                source=SOURCE,
                 release_api=URL, target='chrome_public_apk', architecture='arm64',
                 repository=repository, workflow_sha=workflow_sha,
                 run_id=run_id,
