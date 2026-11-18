@@ -12,7 +12,10 @@ archive_relay_tree() (
   shopt -s dotglob nullglob
   entries=(*)
   (( ${#entries[@]} > 0 )) || fail 'Cannot checkpoint an empty build tree'
-  tar --format=posix --pax-option=delete=atime,delete=ctime --remove-files -cf - -- "${entries[@]}"
+  # Compression alone does not preserve holes on extraction. A dense restored
+  # file could consume blocks the previous runner did not need.
+  tar --format=posix --sparse --pax-option=delete=atime,delete=ctime \
+    --remove-files -cf - -- "${entries[@]}"
 )
 
 extract_relay_tree() {
