@@ -95,8 +95,8 @@ def verify_restore(root, workspace, stage):
     with (root / 'metadata/runners.jsonl').open('rb') as history:
         for n in range(int(stage)):
             line = history.readline(16 * 1024 + 1)
-            if not line or len(line) > 16 * 1024:
-                raise ValueError(f'Missing or oversized checkpoint record for stage {n:02d}')
+            if not line.endswith(b'\n') or len(line) > 16 * 1024:
+                raise ValueError(f'Missing, unterminated or oversized checkpoint record for stage {n:02d}')
             record = parse_release_json(line)
             if (not isinstance(record, dict) or record.get('stage') != f'{n:02d}'
                     or record.get('status') != 'running' or record.get('final_stage') is not False):

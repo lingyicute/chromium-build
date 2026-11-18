@@ -1247,6 +1247,11 @@ class Hardening(unittest.TestCase):
                 self.assertNotEqual(result.returncode, 0)
                 self.assertIn(message, result.stderr)
 
+            # An otherwise valid final JSON value needs a separator before appending.
+            records.write_text(json.dumps(prior))
+            assert_rejects('unterminated')
+            records.write_text(json.dumps(prior) + '\n')
+
             snapshot.write_text(json.dumps([{**release, 'version': '158.0.8127.37'}]))
             assert_rejects('ChromiumDash snapshot does not match')
             snapshot.write_text(json.dumps([release]))
