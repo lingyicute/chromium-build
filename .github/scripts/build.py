@@ -15,11 +15,11 @@ import time
 #   130 ninja >= 1.13 (ExitInterrupted)
 # Status 1 is a genuine build error ("subcommand failed") and must NOT resume.
 NINJA_INTERRUPTED = (2, 130)
-# Compile until a fixed offset from the job start recorded by host.sh. The rest
+# Compile until a fixed offset from the stage start recorded before checkout. The rest
 # of the 350-minute job is reserved for checkpoint pack/upload (normal stages)
 # or APK verification/upload (final stage); a faster setup means more compiling.
-NORMAL_JOB_DEADLINE_SECONDS = 265 * 60
-FINAL_JOB_DEADLINE_SECONDS = 330 * 60
+NORMAL_JOB_DEADLINE_SECONDS = 260 * 60
+FINAL_JOB_DEADLINE_SECONDS = 325 * 60
 MIN_BUDGET_SECONDS = 300
 STOP_GRACE_SECONDS = 180
 CLEANUP_TIMEOUT_SECONDS = 10

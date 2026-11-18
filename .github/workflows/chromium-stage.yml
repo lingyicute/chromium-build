@@ -43,12 +43,6 @@ jobs:
     # Every step is time-boxed: continue-on-error tolerates a failure, not a hang,
     # and an unbounded step would run into the job limit and take the stage with it.
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        timeout-minutes: 5
-        with:
-          ref: ${{ github.sha }}
-          persist-credentials: false
-          fetch-depth: 1
       - name: Validate control-plane inputs (never shell-interpolate expressions)
         id: validate
         timeout-minutes: 1
@@ -60,7 +54,8 @@ jobs:
           FINAL_STAGE: ${{ inputs.final }}
         run: |
           /usr/bin/python3 - <<'PY'
-          import os, re
+          import os, re, time
+          from pathlib import Path
           # Stage 00 builds a fresh tree, so it must not name a checkpoint.
           fresh = os.environ['STAGE'] == '00'
           for key, pattern in [
@@ -71,17 +66,26 @@ jobs:
           ]:
               if not re.fullmatch(pattern, os.environ[key]):
                   raise SystemExit('Invalid ' + key)
+          # Earliest user step: include checkout and setup in the same stage budget.
+          start = int(time.clock_gettime(time.CLOCK_BOOTTIME))
+          (Path(os.environ['RUNNER_TEMP']) / 'chromium-job-start').write_text(f'{start}\n')
           PY
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        timeout-minutes: 5
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+          fetch-depth: 1
       - name: Prepare disposable hosted runner (no apt)
         timeout-minutes: 15
         run: bash .github/scripts/host.sh
       - name: Resolve stable, fetch locked source, run upstream hooks, configure
         if: inputs.stage == '00'
-        timeout-minutes: 240
+        timeout-minutes: 230
         shell: bash
         run: |
           set -Eeuo pipefail
-          timeout --signal=INT --kill-after=120s 235m bash .github/scripts/fetch.sh 2>&1 \
+          timeout --signal=INT --kill-after=120s 225m bash .github/scripts/fetch.sh 2>&1 \
             | tee -i "$RUNNER_TEMP/chromium-logs/prepare.log"
       - name: Save source resolution and GN configuration
         if: inputs.stage == '00'
@@ -129,8 +133,8 @@ jobs:
         run: bash .github/scripts/restore.sh
       - name: Compile until completion or our orderly checkpoint deadline
         id: build
-        # Backstop only: build.py stops Ninja at the job deadline (<= 330 min).
-        timeout-minutes: 335
+        # Backstop only: build.py stops Ninja at the job deadline (<= 325 min).
+        timeout-minutes: 330
         env:
           STAGE: ${{ inputs.stage }}
           FINAL_STAGE: ${{ inputs.final }}
@@ -197,6 +201,18 @@ jobs:
           if-no-files-found: error
           retention-days: 3
           overwrite: false
+      - name: Save stage logs
+        if: always() && steps.validate.outcome == 'success'
+        # Diagnostics must never fail a stage whose checkpoint or APK is already
+        # safe. Run before the best-effort checkpoint retry, which may exhaust the job.
+        timeout-minutes: 1
+        continue-on-error: true
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: logs-${{ github.run_id }}-${{ github.run_attempt }}-${{ inputs.stage }}
+          path: ${{ runner.temp }}/chromium-logs/
+          retention-days: 7
+          if-no-files-found: ignore
       - name: Retry the checkpoint upload once (best effort within the job limit)
         if: steps.build.outputs.status == 'running' && !inputs.final && steps.upload.outcome != 'success'
         id: upload-retry
@@ -212,15 +228,3 @@ jobs:
           if-no-files-found: error
           retention-days: 3
           overwrite: false
-      - name: Save stage logs
-        if: always() && steps.validate.outcome == 'success'
-        # Diagnostics must never fail a stage whose checkpoint or APK is already
-        # safe, nor push the worst-case schedule past the job limit.
-        timeout-minutes: 1
-        continue-on-error: true
-        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
-        with:
-          name: logs-${{ github.run_id }}-${{ github.run_attempt }}-${{ inputs.stage }}
-          path: ${{ runner.temp }}/chromium-logs/
-          retention-days: 7
-          if-no-files-found: ignore

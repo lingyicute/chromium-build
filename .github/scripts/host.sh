@@ -17,8 +17,6 @@ done
   || { echo "Unsupported image: ${ID:-unknown} ${VERSION_ID:-unknown} (need ubuntu 24.04)" >&2; exit 1; }
 mkdir -p "${RUNNER_TEMP:?}/chromium-logs"
 [[ -x /usr/bin/python3 ]] || { echo 'Missing /usr/bin/python3; refusing apt/pip fallback' >&2; exit 1; }
-# Record monotonic boot time so NTP wall-clock adjustments cannot skew stage budgets.
-/usr/bin/python3 -c 'import time; print(int(time.clock_gettime(time.CLOCK_BOOTTIME)))' > "$RUNNER_TEMP/chromium-job-start"
 # Refuse an unexpected layout before any purge, chown or swap operation.
 require_relay_mount
 workdirs=(/mnt/chromium-relay /mnt/chromium-transfer)

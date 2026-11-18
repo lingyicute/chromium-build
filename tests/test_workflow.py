@@ -1,5 +1,6 @@
 """Offline smoke tests. Python stdlib only; does NOT compile Chromium."""
 import hashlib
+import math
 import importlib.util
 import io
 import json
@@ -379,11 +380,11 @@ class Deadline(unittest.TestCase):
         self.assertEqual(build.compute_jobs(cpu_count=4, mem_kib=2 * 1024 * 1024), 1)
 
     def test_compute_budget(self):
-        self.assertEqual(build.compute_budget(1000, 1000 + 20 * 60, final_stage=False), 245 * 60)
-        self.assertEqual(build.compute_budget(1000, 1000 + 80 * 60, final_stage=False), 185 * 60)
-        self.assertEqual(build.compute_budget(1000, 1000 + 20 * 60, final_stage=True), 310 * 60)
-        self.assertEqual(build.compute_budget(1000, 1000 + 80 * 60, final_stage=True), 250 * 60)
-        self.assertLess(build.compute_budget(1000, 1000 + 262 * 60, final_stage=False), build.MIN_BUDGET_SECONDS)
+        self.assertEqual(build.compute_budget(1000, 1000 + 20 * 60, final_stage=False), 240 * 60)
+        self.assertEqual(build.compute_budget(1000, 1000 + 80 * 60, final_stage=False), 180 * 60)
+        self.assertEqual(build.compute_budget(1000, 1000 + 20 * 60, final_stage=True), 305 * 60)
+        self.assertEqual(build.compute_budget(1000, 1000 + 80 * 60, final_stage=True), 245 * 60)
+        self.assertLess(build.compute_budget(1000, 1000 + 257 * 60, final_stage=False), build.MIN_BUDGET_SECONDS)
 
 
 class Supervisor(unittest.TestCase):
@@ -593,7 +594,7 @@ class StaticPolicy(unittest.TestCase):
     @staticmethod
     def stage_steps():
         stage = (ROOT / '.github/workflows/chromium-stage.yml').read_text()
-        return re.split(r'\n      - ', stage.split('\n    steps:\n', 1)[1])
+        return re.split(r'\n      - ', '\n' + stage.split('\n    steps:\n', 1)[1])[1:]
 
     def step_timeout(self, name):
         step, = [step for step in self.stage_steps() if step.startswith(f'name: {name}')]
@@ -621,23 +622,20 @@ class StaticPolicy(unittest.TestCase):
         self.assertEqual(len(re.findall(r'^\s+final:\s*true\s*$', stable, re.M)), 1)
         self.assertRegex(stable, r'part-08:[\s\S]*?final:\s*true[\s\S]*?result:')
         self.assertIn("if: steps.build.outputs.status == 'running' && !inputs.final", stage)
-        grace, logs = 3, self.step_timeout('Save stage logs')  # build.supervise() waits 180 s for Ninja.
-        # host.sh records the start only after job setup, checkout and input validation, so
-        # leave those a minute of the 350-minute job limit.
-        limit = 350 - 1
-        # Normal stage: 265m budget + 3m grace + 45m pack + 35m upload + 1m logs = 349m; the
-        # upload retry is best effort.
-        self.assertLessEqual(build.NORMAL_JOB_DEADLINE_SECONDS // 60 + grace + self.step_timeout('Destructively')
+        # Round the whole shutdown allowance up, including bounded session cleanup.
+        shutdown = math.ceil((build.STOP_GRACE_SECONDS + build.CLEANUP_TIMEOUT_SECONDS + 1) / 60)
+        logs = self.step_timeout('Save stage logs')
+        job_limit = int(re.search(r'^    timeout-minutes: (\d+)$', stage, re.M)[1])
+        limit = job_limit - 4  # Pre-step job init, transitions and post-job work.
+        self.assertLessEqual(build.NORMAL_JOB_DEADLINE_SECONDS // 60 + shutdown + self.step_timeout('Destructively')
                              + self.step_timeout('Upload immutable checkpoint') + logs, limit)
-        # Final stage: 330m budget + 3m grace, then verify, upload, its retry and the unverified
-        # fallback each run to their limit, and the logs are still saved in time.
         post_build = sum(self.step_timeout(name) for name in (
             'Verify APK signature', 'Upload APK', 'Retry the APK upload', 'Keep the unverified APK'))
-        self.assertLessEqual(build.FINAL_JOB_DEADLINE_SECONDS // 60 + grace + post_build + logs, limit)
-        # The compile step backstop must never cut off an orderly final-stage stop.
+        self.assertLessEqual(build.FINAL_JOB_DEADLINE_SECONDS // 60 + shutdown + post_build + logs, limit)
         step_timeout = int(re.search(r'id: build\n(?:\s+#.*\n)*\s+timeout-minutes: (\d+)', stage)[1])
-        self.assertGreaterEqual(step_timeout, build.FINAL_JOB_DEADLINE_SECONDS // 60 + 3)
-        self.assertLessEqual(step_timeout, 350)
+        self.assertGreaterEqual(step_timeout, build.FINAL_JOB_DEADLINE_SECONDS // 60 + shutdown)
+        self.assertLess(step_timeout, job_limit)
+        self.assertLess(stage.index('name: Save stage logs'), stage.index('name: Retry the checkpoint upload'))
 
     def test_prepare_compiles_as_stage_00(self):
         stable = (ROOT / '.github/workflows/chromium-stable.yml').read_text()
@@ -660,7 +658,11 @@ class StaticPolicy(unittest.TestCase):
         def valid(**overrides):
             env = dict(os.environ, STAGE='03', ARTIFACT_ID='123', EXPECTED_SHA256='a' * 64, FINAL_STAGE='false')
             env.update(overrides)
-            return subprocess.run([sys.executable, '-c', script], env=env, capture_output=True).returncode == 0
+            with tempfile.TemporaryDirectory() as tmp:
+                env['RUNNER_TEMP'] = tmp
+                ok = subprocess.run([sys.executable, '-c', script], env=env, capture_output=True).returncode == 0
+                self.assertEqual((Path(tmp) / 'chromium-job-start').is_file(), ok)
+                return ok
 
         self.assertTrue(valid())
         self.assertTrue(valid(STAGE='08', FINAL_STAGE='true'))
@@ -1304,11 +1306,14 @@ class Hardening(unittest.TestCase):
 
         self.assertIsNone(build.swap_delta_mib(2048, 1024))
         sp = StaticPolicy()
-        stage00 = sum(sp.step_timeout(name) for name in (
-            'Prepare disposable hosted runner', 'Resolve stable, fetch locked source',
-            'Save source resolution'))
-        self.assertLess(stage00 * 60 + build.MIN_BUDGET_SECONDS, build.NORMAL_JOB_DEADLINE_SECONDS)
         stage_yml = (ROOT / '.github/workflows/chromium-stage.yml').read_text()
+        checkout = int(re.search(r'uses: actions/checkout@.*\n        timeout-minutes: (\d+)', stage_yml)[1])
+        stage00 = checkout + sum(sp.step_timeout(name) for name in (
+            'Validate control-plane', 'Prepare disposable hosted runner', 'Resolve stable, fetch locked source',
+            'Save source resolution'))
+        self.assertLessEqual(stage00 * 60 + build.MIN_BUDGET_SECONDS, build.NORMAL_JOB_DEADLINE_SECONDS)
+        self.assertLess(stage_yml.index("'chromium-job-start'"), stage_yml.index('uses: actions/checkout@'))
+        self.assertNotIn('chromium-job-start', (ROOT / '.github/scripts/host.sh').read_text())
         self.assertIn("if: always() && steps.validate.outcome == 'success'", stage_yml)
 
 
