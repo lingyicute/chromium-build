@@ -1363,6 +1363,16 @@ class Hardening(unittest.TestCase):
         self.assertIn('failed or were cancelled: part-01.', summary)
         self.assertNotIn('unverified-apk-*', summary)
 
+    def test_common_disallows_depot_tools_bootstrap_overrides(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            names = ['CUSTOM_CIPD_CLIENT', 'DEPOT_TOOLS_DIR', 'DEPOT_TOOLS_UNAME_S', 'VPYTHON_BYPASS']
+            env = dict(os.environ, RUNNER_TEMP=tmp, **dict.fromkeys(names, 'inherited'))
+            p = subprocess.run(['bash', '-c', 'source "$1/common.sh"; shift; '
+                                'for name in "$@"; do [[ ! -v "$name" ]] || exit 1; done',
+                                '_', str(ROOT / '.github/scripts'), *names],
+                               env=env, capture_output=True, text=True, timeout=5)
+            self.assertEqual(p.returncode, 0, p.stderr)
+
     def test_common_xdg_isolation_and_interruptible_backoff(self):
         import time
 
