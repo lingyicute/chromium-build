@@ -94,15 +94,21 @@ def _retry_delay(attempt, retry_delay, headers=None, now=None):
 
 
 def _content_length(headers):
-    # http.client's .get() returns only the first header. Do not silently
-    # accept two lengths or an ambiguous transfer/content length combination.
-    if hasattr(headers, 'get_all') and len(headers.get_all('Content-Length', [])) > 1:
-        raise ValueError('Multiple ChromiumDash Content-Length headers')
+    # http.client only understands a single Transfer-Encoding: chunked and
+    # reads the first value of each field. Validate framing before trusting it.
+    if hasattr(headers, 'get_all'):
+        for field in ('Content-Length', 'Transfer-Encoding'):
+            if len(headers.get_all(field, [])) > 1:
+                raise ValueError(f'Multiple ChromiumDash {field} headers')
     raw_len = _header_value(headers, 'Content-Length')
+    encoding = _header_value(headers, 'Transfer-Encoding')
+    if encoding is not None:
+        if raw_len is not None:
+            raise ValueError('ChromiumDash returned both Content-Length and Transfer-Encoding')
+        if not isinstance(encoding, str) or encoding.lower() != 'chunked':
+            raise ValueError('Unsupported ChromiumDash Transfer-Encoding')
     if raw_len is None:
         return None
-    if _header_value(headers, 'Transfer-Encoding') is not None:
-        raise ValueError('ChromiumDash returned both Content-Length and Transfer-Encoding')
     if not isinstance(raw_len, str):
         raise ValueError('Invalid ChromiumDash Content-Length')
     text = raw_len.strip()

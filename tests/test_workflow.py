@@ -135,6 +135,15 @@ class Resolution(unittest.TestCase):
         response.headers['Transfer-Encoding'] = 'chunked'
         with self.assertRaisesRegex(ValueError, 'both Content-Length and Transfer-Encoding'):
             resolve.fetch_release_json(opener=_FakeOpener([response]))
+        del response.headers['Content-Length']
+        self.assertEqual(resolve.fetch_release_json(opener=_FakeOpener([response])), b'[]')
+        response.headers['Transfer-Encoding'] = 'gzip'
+        with self.assertRaisesRegex(ValueError, 'Multiple ChromiumDash Transfer-Encoding'):
+            resolve.fetch_release_json(opener=_FakeOpener([response]))
+        del response.headers['Transfer-Encoding']
+        response.headers['Transfer-Encoding'] = 'gzip, chunked'
+        with self.assertRaisesRegex(ValueError, 'Unsupported ChromiumDash Transfer-Encoding'):
+            resolve.fetch_release_json(opener=_FakeOpener([response]))
 
 
 class Checkpoint(unittest.TestCase):
