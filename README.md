@@ -18,7 +18,8 @@
     fetch.sh                 # 源码与工具链锁定、同步、hooks、GN
     checkpoint.py            # 分块清单摘要、逐块先验证后流式恢复
     pack.sh                  # 破坏性导出检查点（仅用于临时 VM）
-    restore.sh               # 恢复并检查仓库/运行/提交身份
+    restore.sh               # 恢复并检查仓库/运行/提交/前序阶段
+    source_state.py          # 源码锁、Git 工作树、版本与续编历史校验
     build.py                 # 按 job 截止点分配编译预算，监督 Ninja 进程会话
     build.sh                 # 编译日志
     release.sh               # APK 验签与产物整理
@@ -55,7 +56,7 @@ prepare（stage 00，与续编段共用 chromium-stage.yml）
 part-01 → part-02 → … → part-08
   ├─ 按前序 job 给出的精确 artifact ID 下载
   ├─ 用前序 job 给出的 SHA-256 认证分块清单，逐块验证后才解包
-  ├─ 恢复固定路径与纳秒文件时间戳
+  ├─ 恢复固定路径与纳秒文件时间戳，核对仓库、版本和完整前序记录
   ├─ 不重新 sync / runhooks / gn gen
   ├─ 本地 Ninja 编译至本 job 开始后第 260 分钟（最终段 part-08 为第 325 分钟）
   ├─ 正常到点未完成：常规段正常中断并导出新检查点；最终段跳过无用检查点直接结束

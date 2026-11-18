@@ -1156,8 +1156,7 @@ class Hardening(unittest.TestCase):
             self.assertNotIn('::warning::', p.stderr)
 
     def test_restore_sh_validation_and_policy_checks(self):
-        restore_sh = (ROOT / '.github/scripts/restore.sh').read_text()
-        script = re.search(r'"\$CR_PYTHON" - <<\'PY\'\n(.*?)\nPY\n', restore_sh, re.S)[1]
+        command = [sys.executable, str(ROOT / '.github/scripts/source_state.py'), 'verify-restore']
         depot_sha = (ROOT / 'config/depot_tools_revision.txt').read_text().strip()
 
         with tempfile.TemporaryDirectory() as tmp:
@@ -1188,42 +1187,71 @@ class Hardening(unittest.TestCase):
             lock = {
                 'repository': 'o/r', 'run_id': '1', 'workflow_sha': 'c' * 40,
                 'target': 'chrome_public_apk', 'architecture': 'arm64',
-                'source': 'https://chromium.googlesource.com/chromium/src.git',
+                'source': resolve.SOURCE, 'release_api': resolve.URL,
                 'chromium_revision': src_sha, 'depot_tools_revision': dep_head,
                 'version': '158.0.8127.36',
             }
             (cr / 'metadata/build-lock.json').write_text(json.dumps(lock))
             env = dict(os.environ, CR_ROOT=str(cr), GITHUB_WORKSPACE=str(ws),
-                       GITHUB_REPOSITORY='o/r', GITHUB_RUN_ID='1', GITHUB_SHA='c' * 40)
-            p = subprocess.run([sys.executable, '-c', script], env=env, capture_output=True, text=True)
+                       GITHUB_REPOSITORY='o/r', GITHUB_RUN_ID='1', GITHUB_SHA='c' * 40, STAGE='01')
+            prior = dict(stage='00', status='running', final_stage=False, run_attempt='1')
+            records = cr / 'metadata/runners.jsonl'
+            records.write_text(json.dumps(prior) + '\n')
+            p = subprocess.run(command, env=env, capture_output=True, text=True)
             self.assertEqual(p.returncode, 0, p.stderr)
 
+            p = subprocess.run(command, env={**env, 'STAGE': '02'}, capture_output=True, text=True)
+            self.assertNotEqual(p.returncode, 0)
+            records.write_text(json.dumps({**prior, 'stage': '02'}) + '\n')
+            p = subprocess.run(command, env=env, capture_output=True, text=True)
+            self.assertNotEqual(p.returncode, 0)
+            self.assertIn('must contain running stages 00 through 00', p.stderr)
+            records.write_text(json.dumps(prior) + '\n')
+
+            gitdir = cr / 'src/.git'
+            moved = cr / 'elsewhere'
+            gitdir.rename(moved)
+            gitdir.symlink_to(moved, target_is_directory=True)
+            p = subprocess.run(command, env=env, capture_output=True, text=True)
+            self.assertNotEqual(p.returncode, 0)
+            self.assertIn('missing a real .git', p.stderr)
+            gitdir.unlink()
+            moved.rename(gitdir)
+
+            version_file = cr / 'src/chrome/VERSION'
+            valid_version = version_file.read_text()
+            version_file.write_text(valid_version + 'MAJOR=158\n')
+            p = subprocess.run(command, env=env, capture_output=True, text=True)
+            self.assertNotEqual(p.returncode, 0)
+            self.assertIn('duplicates field: MAJOR', p.stderr)
+            version_file.write_text(valid_version)
+
             (cr / 'src/buildtools/linux64/gn').unlink()
-            p = subprocess.run([sys.executable, '-c', script], env=env, capture_output=True, text=True)
+            p = subprocess.run(command, env=env, capture_output=True, text=True)
             self.assertNotEqual(p.returncode, 0)
             self.assertIn('buildtools/linux64/gn', p.stderr)
             (cr / 'src/buildtools/linux64/gn').write_text('#!/bin/sh\n')
             (cr / 'src/buildtools/linux64/gn').chmod(0o755)
 
             (cr / 'src/chrome/VERSION').write_text('MAJOR=158\nMINOR=0\nBUILD=8127\n')
-            p = subprocess.run([sys.executable, '-c', script], env=env, capture_output=True, text=True)
+            p = subprocess.run(command, env=env, capture_output=True, text=True)
             self.assertNotEqual(p.returncode, 0)
             self.assertIn('missing field: PATCH', p.stderr)
 
             (cr / 'src/chrome/VERSION').write_text('MAJOR=158\nMINOR=0\nBUILD=8127\nPATCH=36\n')
             (cr / 'metadata/build-lock.json').write_text(json.dumps({**lock, 'source': 'https://evil.example/src.git'}))
-            p = subprocess.run([sys.executable, '-c', script], env=env, capture_output=True, text=True)
+            p = subprocess.run(command, env=env, capture_output=True, text=True)
             self.assertNotEqual(p.returncode, 0)
-            self.assertIn('source/target/architecture mismatch', p.stderr)
+            self.assertIn('source/target/architecture', p.stderr)
 
             # Missing .git must not climb into an ancestor repository.
             import shutil
             shutil.rmtree(cr / 'src/.git')
             subprocess.run(['git', 'init', '-q', str(tmp)], check=True)
             (cr / 'metadata/build-lock.json').write_text(json.dumps(lock))
-            p = subprocess.run([sys.executable, '-c', script], env=env, capture_output=True, text=True)
+            p = subprocess.run(command, env=env, capture_output=True, text=True)
             self.assertNotEqual(p.returncode, 0)
-            self.assertIn('missing .git', p.stderr)
+            self.assertIn('missing a real .git', p.stderr)
 
         self.assertIn("'generate_location_tags': False", (ROOT / '.github/scripts/fetch.sh').read_text())
         self.assertIn('trap reap_cleanup EXIT', (ROOT / '.github/scripts/host.sh').read_text())

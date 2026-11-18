@@ -129,6 +129,7 @@ jobs:
         timeout-minutes: 40
         env:
           EXPECTED_SHA256: ${{ inputs.sha256 }}
+          STAGE: ${{ inputs.stage }}
         run: bash .github/scripts/restore.sh
       - name: Compile until completion or our orderly checkpoint deadline
         id: build

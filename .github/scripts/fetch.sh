@@ -2,23 +2,8 @@
 source "$(dirname "$0")/common.sh"
 mkdir -p "$HOME" "$CR_ROOT/cache" "$CR_ROOT/metadata" "$CIPD_CACHE_DIR"
 "$CR_PYTHON" "$GITHUB_WORKSPACE/.github/scripts/resolve.py"
-lock_raw=$("$CR_PYTHON" - <<'PY'
-import json, os, re
-with open(os.environ['CR_ROOT'] + '/metadata/build-lock.json', encoding='utf-8') as f:
-    x = json.load(f)
-version = x['version']
-revision = x['chromium_revision']
-depot = x['depot_tools_revision']
-if not isinstance(version, str) or not re.fullmatch(r'(?:0|[1-9][0-9]{0,3})(?:\.(?:0|[1-9][0-9]{0,5})){3}', version):
-    raise SystemExit('Invalid version in build-lock.json')
-for name, sha in (('chromium_revision', revision), ('depot_tools_revision', depot)):
-    if not isinstance(sha, str) or not re.fullmatch(r'[0-9a-f]{40}', sha):
-        raise SystemExit(f'Invalid {name} in build-lock.json')
-print(version)
-print(revision)
-print(depot)
-PY
-)
+source_state="$GITHUB_WORKSPACE/.github/scripts/source_state.py"
+lock_raw=$("$CR_PYTHON" "$source_state" read-lock)
 readarray -t lock <<< "$lock_raw"
 [[ "${#lock[@]}" -eq 3 && -n "${lock[0]}" && -n "${lock[1]}" && -n "${lock[2]}" ]] || fail 'Failed to read build-lock.json'
 version="${lock[0]}"; revision="${lock[1]}"; depot_revision="${lock[2]}"
@@ -55,28 +40,11 @@ cd "$CR_ROOT"
 # All DEPS and hooks are upstream Chromium's. This is deliberately NOT a
 # network allowlist or a claim that every transitive dependency is first-party.
 retry gclient sync --nohooks --no-history --revision "src@$revision" --jobs=8
-[[ "$(git -C src rev-parse HEAD)" == "$revision" ]] || fail 'gclient changed source revision'
-"$CR_PYTHON" - <<'PY'
-import json, os
-from pathlib import Path
-root = Path(os.environ['CR_ROOT'])
-parts = {k.strip(): v.strip()
-         for line in (root / 'src/chrome/VERSION').read_text(encoding='utf-8').splitlines()
-         if not line.lstrip().startswith('#') and '=' in line
-         for k, v in (line.split('=', 1),)}
-try:
-    actual = '.'.join(parts[k] for k in ('MAJOR', 'MINOR', 'BUILD', 'PATCH'))
-except KeyError as exc:
-    raise SystemExit(f'chrome/VERSION missing field: {exc.args[0]}') from exc
-expected = json.loads((root / 'metadata/build-lock.json').read_text(encoding='utf-8'))['version']
-if actual != expected:
-    raise SystemExit(f'chrome/VERSION mismatch: {actual} != {expected}')
-PY
+"$CR_PYTHON" "$source_state" verify-source
 # Do NOT run install-build-deps.sh: that would add an Ubuntu APT trust path.
 # Missing system libraries/tools fail visibly instead of fetching alternatives.
 retry gclient runhooks
-[[ "$(git -C src rev-parse HEAD)" == "$revision" ]] || fail 'gclient runhooks changed source revision'
-[[ "$(git -C depot_tools rev-parse HEAD)" == "$depot_revision" ]] || fail 'depot_tools revision changed after sync/hooks'
+"$CR_PYTHON" "$source_state" verify-source
 gclient revinfo > "$CR_ROOT/metadata/dependencies.txt"
 cp "$CR_ROOT/src/DEPS" "$CR_ROOT/metadata/DEPS"
 mkdir -p "$CR_ROOT/src/out/Release"
