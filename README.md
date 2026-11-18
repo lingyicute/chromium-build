@@ -31,6 +31,9 @@ config/
   debug_signer_sha256.txt
 tests/
   test_workflow.py
+  test_runner.py
+  test_apk.py
+  test_checkpoint_integration.py
 README.md
 ```
 > [!tip]
