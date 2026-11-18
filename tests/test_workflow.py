@@ -470,6 +470,21 @@ class Supervisor(unittest.TestCase):
         self.assertRegex(p.stderr, r'failed:1; (?:\d+|unknown) MiB written to swap .* GiB left free')
         self.assertEqual((files['output'], files['root/metadata/runners.jsonl']), ('', ''))
 
+    def test_build_refuses_completion_with_a_child_in_a_new_session(self):
+        import shlex
+
+        child = 'import os,time; print(os.getpid(), flush=True); time.sleep(2)'
+        parent = (
+            'import subprocess,sys\n'
+            f'child = subprocess.Popen([sys.executable, "-c", {child!r}], '
+            'start_new_session=True, stdout=subprocess.PIPE)\n'
+            'assert int(child.stdout.readline()) == child.pid\n'
+        )
+        p, files = self.run_main(f'exec {shlex.quote(sys.executable)} -c {shlex.quote(parent)}')
+        self.assertNotEqual(p.returncode, 0)
+        self.assertRegex(p.stderr, r'failed:forced-process-cleanup\(\d+\)')
+        self.assertEqual((files['output'], files['root/metadata/runners.jsonl']), ('', ''))
+
     def test_cancellation_does_not_publish_status_or_leave_ninja_alive(self):
         for signum in (signal.SIGINT, signal.SIGTERM):
             with self.subTest(signal=signum), tempfile.TemporaryDirectory() as tmp:

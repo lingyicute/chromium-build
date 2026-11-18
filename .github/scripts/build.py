@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Only OUR orderly deadline may cause a resume; never mask an OOM/error."""
+import ctypes
 import json
 import math
 import os
@@ -74,55 +75,101 @@ def _has_live_thread(proc_dir):
     return False
 
 
-def _live_session_pids(sid, proc_root='/proc'):
-    pids = []
+def _proc_fields(proc_dir):
+    raw = (proc_dir / 'stat').read_text(encoding='utf-8', errors='replace')
+    # Fields after the ")" closing comm: state ppid pgrp session ... num_threads(17).
+    fields = raw[raw.rindex(')') + 2:].split()
+    if len(fields) < 4:
+        raise ValueError('Incomplete /proc stat')
+    return fields
+
+
+def _proc_entries(proc_root='/proc'):
     for entry in os.listdir(proc_root):
         if not entry.isdigit():
             continue
+        proc_dir = Path(proc_root, entry)
         try:
-            proc_dir = Path(proc_root, entry)
-            stat = (proc_dir / 'stat').read_text(encoding='utf-8', errors='replace')
-            # Fields after the ")" closing comm: state ppid pgrp session ... num_threads(17)
-            fields = stat[stat.rindex(')') + 2:].split()
-            if int(fields[3]) != sid:
-                continue
-            if fields[0] not in DEAD_PROC_STATES:
-                pids.append(int(entry))
-            elif fields[0] == 'Z' and len(fields) > 17 and int(fields[17]) > 1 and _has_live_thread(proc_dir):
-                pids.append(int(entry))
-        except (OSError, ValueError, IndexError):
-            pass
+            fields = _proc_fields(proc_dir)
+        except (OSError, ValueError):
+            continue
+        yield int(entry), proc_dir, fields
+
+
+def enable_orphan_tracking():
+    # Adopt otherwise orphaned descendants even when a tool uses setsid().
+    # Keep existing direct children (the log tee) out of the Ninja cleanup.
+    pr_set_child_subreaper = 36  # Linux prctl.h
+    prctl = ctypes.CDLL(None, use_errno=True).prctl
+    prctl.argtypes = [ctypes.c_int] + [ctypes.c_ulong] * 4
+    if prctl(pr_set_child_subreaper, 1, 0, 0, 0) != 0:
+        errno = ctypes.get_errno()
+        raise OSError(errno, os.strerror(errno))
+    return frozenset(pid for pid, _, fields in _proc_entries() if fields[1] == str(os.getpid()))
+
+
+def _is_adopted(pid, fields, protected_children):
+    return (protected_children is not None and fields[1] == str(os.getpid())
+            and pid not in protected_children)
+
+
+def _belongs_to_build(pid, fields, sid, protected_children):
+    return fields[3] == str(sid) or _is_adopted(pid, fields, protected_children)
+
+
+def _live_session_pids(sid, proc_root='/proc', protected_children=None):
+    pids = []
+    for pid, proc_dir, fields in _proc_entries(proc_root):
+        if not _belongs_to_build(pid, fields, sid, protected_children):
+            continue
+        if fields[0] not in DEAD_PROC_STATES:
+            pids.append(pid)
+        elif (fields[0] == 'Z' and len(fields) > 17 and fields[17].isdigit()
+              and int(fields[17]) > 1 and _has_live_thread(proc_dir)):
+            pids.append(pid)
     return pids
 
 
-def kill_session(sid, timeout=CLEANUP_TIMEOUT_SECONDS):
-    """Return (forcibly signalled pids, still-live pids) of the Ninja session.
-
-    Ninja setpgid()s each child, so killpg(ninja) alone misses build commands.
-    Scan again to account for forks and processes that are still exiting.
-    """
+def kill_session(sid, timeout=CLEANUP_TIMEOUT_SECONDS, protected_children=None):
+    """Return (forcibly signalled pids, still-live pids) of the build."""
+    # Ninja setpgid()s each command; a tool can also start a different session.
+    # Re-scan for processes that forked or were adopted during this pass.
     deadline = time.monotonic() + timeout
     killed = set()
+    saw_empty = False
     while True:
-        pids = _live_session_pids(sid)
+        pids = _live_session_pids(sid, protected_children=protected_children)
         if not pids:
-            return sorted(killed), []
+            if saw_empty or protected_children is None or time.monotonic() >= deadline:
+                break
+            saw_empty = True
+            continue
+        saw_empty = False
         for pid in pids:
             try:
                 fd = os.pidfd_open(pid)
                 try:
-                    # A pid may have been recycled since the /proc scan. Signal
-                    # the open process handle, never a newly recycled pid.
-                    if os.getsid(pid) == sid:
+                    # Recheck ownership after opening the handle, before signalling.
+                    fields = _proc_fields(Path('/proc', str(pid)))
+                    if _belongs_to_build(pid, fields, sid, protected_children):
                         signal.pidfd_send_signal(fd, signal.SIGKILL)
                         killed.add(pid)
                 finally:
                     os.close(fd)
-            except OSError:
+            except (OSError, ValueError):
                 pass
         if time.monotonic() >= deadline:
-            return sorted(killed), _live_session_pids(sid)
+            pids = _live_session_pids(sid, protected_children=protected_children)
+            break
         time.sleep(0.05)
+    if protected_children is not None:
+        for pid, _, fields in _proc_entries():
+            if pid != sid and _is_adopted(pid, fields, protected_children):
+                try:
+                    os.waitpid(pid, os.WNOHANG)
+                except ChildProcessError:
+                    pass
+    return sorted(killed), pids
 
 
 def check_cancelled(cancel_signal):
@@ -145,7 +192,8 @@ def wait_for_ninja(process, timeout, cancel_signal):
                 raise
 
 
-def supervise(command, seconds, grace=STOP_GRACE_SECONDS, env=None, cancel_signal=None):
+def supervise(command, seconds, grace=STOP_GRACE_SECONDS, env=None, cancel_signal=None,
+              protected_children=None):
     if (isinstance(seconds, bool) or not isinstance(seconds, (int, float))
             or not math.isfinite(seconds) or seconds <= 0):
         raise ValueError('seconds must be a positive finite number')
@@ -185,7 +233,7 @@ def supervise(command, seconds, grace=STOP_GRACE_SECONDS, env=None, cancel_signa
                         result = f'failed:{rc}'
     finally:
         p.poll()
-        forced, lingering = kill_session(p.pid)
+        forced, lingering = kill_session(p.pid, protected_children=protected_children)
         if p.pid in lingering:
             p.poll()
         else:
@@ -303,7 +351,7 @@ def main():
     swap_before = swapped_out_bytes()
     status = supervise(['third_party/ninja/ninja', '-C', 'out/Release',
                         f'-j{jobs}', 'chrome_public_apk'], remaining, env=env,
-                       cancel_signal=cancel_signal)
+                       cancel_signal=cancel_signal, protected_children=enable_orphan_tracking())
     elapsed = round(monotonic_now() - t0, 1)
     # Memory pressure and disk headroom: what the -j cap and later stages depend on.
     swap_after, disk_free = swapped_out_bytes(), free_gib(root)
