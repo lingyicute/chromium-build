@@ -21,6 +21,8 @@ NINJA_INTERRUPTED = (2, 130)
 NORMAL_JOB_DEADLINE_SECONDS = 265 * 60
 FINAL_JOB_DEADLINE_SECONDS = 330 * 60
 MIN_BUDGET_SECONDS = 300
+STOP_GRACE_SECONDS = 180
+CLEANUP_TIMEOUT_SECONDS = 10
 
 
 def monotonic_now():
@@ -63,7 +65,7 @@ def _has_live_thread(proc_dir):
         if not tid.isdigit():
             continue
         try:
-            tstat = (proc_dir / 'task' / tid / 'stat').read_text(encoding='utf-8')
+            tstat = (proc_dir / 'task' / tid / 'stat').read_text(encoding='utf-8', errors='replace')
             tfields = tstat[tstat.rindex(')') + 2:].split()
             if tfields[0] not in DEAD_PROC_STATES:
                 return True
@@ -79,7 +81,7 @@ def _live_session_pids(sid, proc_root='/proc'):
             continue
         try:
             proc_dir = Path(proc_root, entry)
-            stat = (proc_dir / 'stat').read_text(encoding='utf-8')
+            stat = (proc_dir / 'stat').read_text(encoding='utf-8', errors='replace')
             # Fields after the ")" closing comm: state ppid pgrp session ... num_threads(17)
             fields = stat[stat.rindex(')') + 2:].split()
             if int(fields[3]) != sid:
@@ -93,72 +95,97 @@ def _live_session_pids(sid, proc_root='/proc'):
     return pids
 
 
-def kill_session(sid, timeout=10.0):
-    """SIGKILL every live process in ninja's session; return any that remain.
-    Ninja setpgid()s each child into its own process group, so killpg(ninja)
-    alone cannot reach compiler/linker descendants, and a single /proc pass
-    can race with forks or still-exiting processes before pack.sh starts."""
+def kill_session(sid, timeout=CLEANUP_TIMEOUT_SECONDS):
+    """Return (forcibly signalled pids, still-live pids) of the Ninja session.
+
+    Ninja setpgid()s each child, so killpg(ninja) alone misses build commands.
+    Scan again to account for forks and processes that are still exiting.
+    """
     deadline = time.monotonic() + timeout
+    killed = set()
     while True:
         pids = _live_session_pids(sid)
         if not pids:
-            return []
+            return sorted(killed), []
         for pid in pids:
             try:
-                os.kill(pid, signal.SIGKILL)
+                fd = os.pidfd_open(pid)
+                try:
+                    # A pid may have been recycled since the /proc scan. Signal
+                    # the open process handle, never a newly recycled pid.
+                    if os.getsid(pid) == sid:
+                        signal.pidfd_send_signal(fd, signal.SIGKILL)
+                        killed.add(pid)
+                finally:
+                    os.close(fd)
             except OSError:
                 pass
         if time.monotonic() >= deadline:
-            return _live_session_pids(sid)
+            return sorted(killed), _live_session_pids(sid)
         time.sleep(0.05)
 
 
-def supervise(command, seconds, grace=180, env=None):
+def check_cancelled(cancel_signal):
+    signum = cancel_signal() if cancel_signal is not None else None
+    if signum is not None:
+        raise SystemExit(f'Build supervisor cancelled by signal {signum}; NOT checkpointing')
+
+
+def wait_for_ninja(process, timeout, cancel_signal):
+    if cancel_signal is None:
+        return process.wait(timeout=timeout)
+    deadline = monotonic_now() + timeout
+    while True:
+        check_cancelled(cancel_signal)
+        left = deadline - monotonic_now()
+        try:
+            return process.wait(timeout=max(0, min(left, 0.5)))
+        except subprocess.TimeoutExpired:
+            if monotonic_now() >= deadline:
+                raise
+
+
+def supervise(command, seconds, grace=STOP_GRACE_SECONDS, env=None, cancel_signal=None):
     if (isinstance(seconds, bool) or not isinstance(seconds, (int, float))
             or not math.isfinite(seconds) or seconds <= 0):
         raise ValueError('seconds must be a positive finite number')
     if (isinstance(grace, bool) or not isinstance(grace, (int, float))
             or not math.isfinite(grace) or grace < 0):
         raise ValueError('grace must be a non-negative finite number')
+    check_cancelled(cancel_signal)
     # start_new_session: ninja becomes session leader, so session id == p.pid.
     p = subprocess.Popen(command, start_new_session=True, env=env)
-    lingering = []
     try:
         try:
-            rc = p.wait(timeout=seconds)
+            rc = wait_for_ninja(p, seconds, cancel_signal)
             result = 'completed' if rc == 0 else f'failed:{rc}'
         except subprocess.TimeoutExpired:
             # Races where ninja already failed must not be disguised as timeout.
+            check_cancelled(cancel_signal)
             rc = p.poll()
             if rc is not None:
                 result = 'completed' if rc == 0 else f'failed:{rc}'
             else:
+                signalled = True
                 try:
                     os.killpg(p.pid, signal.SIGINT)
                 except ProcessLookupError:
-                    rc = p.wait()
-                    result = 'completed' if rc == 0 else f'failed:{rc}'
+                    signalled = False
+                try:
+                    rc = wait_for_ninja(p, grace if signalled else min(grace, 1), cancel_signal)
+                except subprocess.TimeoutExpired:
+                    result = 'failed:shutdown-timeout'
                 else:
-                    try:
-                        rc = p.wait(timeout=grace)
-                    except subprocess.TimeoutExpired:
-                        result = 'failed:shutdown-timeout'
+                    if rc == 0:
+                        result = 'completed'
+                    elif signalled and rc in NINJA_INTERRUPTED:
+                        result = 'running'
                     else:
-                        if rc == 0:
-                            result = 'completed'
-                        # -SIGINT: killed before ninja installed its handler; nothing ran.
-                        elif rc in NINJA_INTERRUPTED or rc == -signal.SIGINT:
-                            result = 'running'
-                        else:
-                            result = f'failed:{rc}'
+                        # Signal death is not Ninja acknowledging edge cleanup.
+                        result = f'failed:{rc}'
     finally:
-        # Also stop descendants before checkpointing (even if ninja exited).
-        if p.poll() is None:
-            try:
-                os.killpg(p.pid, signal.SIGKILL)
-            except (ProcessLookupError, PermissionError):
-                pass
-        lingering = list(kill_session(p.pid))
+        p.poll()
+        forced, lingering = kill_session(p.pid)
         if p.pid in lingering:
             p.poll()
         else:
@@ -166,8 +193,14 @@ def supervise(command, seconds, grace=180, env=None):
                 p.wait(timeout=1.0)
             except subprocess.TimeoutExpired:
                 lingering.append(p.pid)
-    if lingering and not result.startswith('failed:'):
-        return f'failed:lingering-processes({",".join(map(str, lingering))})'
+    check_cancelled(cancel_signal)
+    if not result.startswith('failed:'):
+        if lingering:
+            return f'failed:lingering-processes({",".join(map(str, lingering))})'
+        if forced:
+            # Even if SIGKILL succeeded, an edge could have left partial outputs
+            # behind after Ninja claimed it was done. Don't resume that tree.
+            return f'failed:forced-process-cleanup({",".join(map(str, forced))})'
     return result
 
 
@@ -213,12 +246,20 @@ def free_gib(path):
 
 
 def main():
-    def _handle_sigterm(signum, frame):
-        # Ignore repeated SIGTERM so supervise()'s finally finishes reaping the session.
-        signal.signal(signal.SIGTERM, signal.SIG_IGN)
-        raise SystemExit(f'Build supervisor terminated by signal {signum}')
+    requested_signal = None
 
-    signal.signal(signal.SIGTERM, _handle_sigterm)
+    def note_cancel(signum, _frame):
+        # Record only, including during spawn and cleanup. Raising from this
+        # handler could abandon a just-spawned session or interrupt its reaping.
+        nonlocal requested_signal
+        if requested_signal is None:
+            requested_signal = signum
+
+    def cancel_signal():
+        return requested_signal
+
+    for signum in (signal.SIGINT, signal.SIGTERM):
+        signal.signal(signum, note_cancel)
 
     stage = os.environ.get('STAGE', '')
     if not re.fullmatch(r'0[0-8]', stage):
@@ -251,6 +292,11 @@ def main():
     output_path = os.environ.get('GITHUB_OUTPUT', '')
     if not output_path:
         raise SystemExit('Missing GITHUB_OUTPUT')
+    with open(output_path, 'a', encoding='utf-8'):
+        pass  # Check writability before spending hours compiling.
+    run_attempt = os.environ['GITHUB_RUN_ATTEMPT']
+    if not re.fullmatch(r'[1-9][0-9]*', run_attempt):
+        raise SystemExit('Invalid GITHUB_RUN_ATTEMPT')
     jobs = compute_jobs()
     os.chdir(root / 'src')
     env = dict(os.environ)
@@ -259,7 +305,8 @@ def main():
     t0 = monotonic_now()
     swap_before = swapped_out_bytes()
     status = supervise(['third_party/ninja/ninja', '-C', 'out/Release',
-                        f'-j{jobs}', 'chrome_public_apk'], remaining, env=env)
+                        f'-j{jobs}', 'chrome_public_apk'], remaining, env=env,
+                       cancel_signal=cancel_signal)
     elapsed = round(monotonic_now() - t0, 1)
     # Memory pressure and disk headroom: what the -j cap and later stages depend on.
     swap_after, disk_free = swapped_out_bytes(), free_gib(root)
@@ -276,7 +323,7 @@ def main():
         status = 'exhausted'
     record = dict(stage=stage, image_os=os.environ.get('ImageOS'),
                   image_version=os.environ.get('ImageVersion'), jobs=jobs,
-                  run_attempt=os.environ['GITHUB_RUN_ATTEMPT'],
+                  run_attempt=run_attempt,
                   final_stage=final_stage, budget_minutes=round(remaining / 60, 1),
                   setup_seconds=setup, elapsed_seconds=elapsed, status=status,
                   swap_out_mib=swap_mib, disk_free_gib=disk_free)
@@ -284,6 +331,7 @@ def main():
     meta_dir.mkdir(parents=True, exist_ok=True)
     with (meta_dir / 'runners.jsonl').open('a', encoding='utf-8') as f:
         f.write(json.dumps(record) + '\n')
+    check_cancelled(cancel_signal)
     with open(output_path, 'a', encoding='utf-8') as f:
         f.write(f'status={status}\n')
     print(f'Stage result: {status} ({elapsed:.1f}s)', flush=True)

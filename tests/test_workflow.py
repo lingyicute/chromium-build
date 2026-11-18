@@ -6,10 +6,12 @@ import json
 import os
 from pathlib import Path
 import re
+import signal
 import subprocess
 import sys
 import tempfile
 import textwrap
+import time
 import unittest
 import urllib.error
 
@@ -351,19 +353,24 @@ class Deadline(unittest.TestCase):
         code = 'import signal,time; signal.signal(signal.SIGINT,signal.SIG_IGN); time.sleep(20)'
         self.assertEqual(self.run_command(code, 0.5, 0.1), 'failed:shutdown-timeout')
 
-    def test_kill_session_reaps_detached_pgrp_child(self):
+    def test_kill_session_refuses_success_with_active_detached_child(self):
         with tempfile.TemporaryDirectory() as tmp:
             pidfile = Path(tmp) / 'child.pid'
             parent_code = (
-                'import os, subprocess, sys, time\n'
-                'c = subprocess.Popen([sys.executable, "-c", "import os,time; os.setpgrp(); time.sleep(30)"])\n'
-                f'open({str(pidfile)!r}, "w").write(str(c.pid))\n'
-                'time.sleep(0.2)\n'
+                'import os, subprocess, sys\n'
+                'c = subprocess.Popen([sys.executable, "-c", "import os,time; os.setpgrp(); print(1, flush=True); time.sleep(30)"], stdout=subprocess.PIPE)\n'
+                'assert c.stdout.readline() == b"1\\n"\n'
+                f'open({str(pidfile)!r}, "w").write(f"{{os.getpid()}} {{c.pid}}")\n'
             )
-            self.assertEqual(self.run_command(parent_code, seconds=5, grace=1), 'completed')
-            child_pid = int(pidfile.read_text())
-            with self.assertRaises(ProcessLookupError):
-                os.kill(child_pid, 0)
+            result = self.run_command(parent_code, seconds=5, grace=1)
+            session_id, child_pid = map(int, pidfile.read_text().split())
+            self.assertEqual(result, f'failed:forced-process-cleanup({child_pid})')
+            # PID 1 may not have reaped a zombie by this point; it cannot write.
+            self.assertEqual(build._live_session_pids(session_id), [])
+
+    def test_signal_death_at_deadline_is_not_an_acknowledgement(self):
+        code = 'import signal,time; signal.signal(signal.SIGINT,signal.SIG_DFL); time.sleep(20)'
+        self.assertEqual(self.run_command(code, 0.5), f'failed:{-signal.SIGINT}')
 
     def test_compute_jobs(self):
         self.assertEqual(build.compute_jobs(cpu_count=4, mem_kib=16 * 1024 * 1024), 4)
@@ -420,6 +427,39 @@ class Supervisor(unittest.TestCase):
         # Memory pressure and disk headroom are what most often explain a failed compile.
         self.assertRegex(p.stderr, r'failed:1; (?:\d+|unknown) MiB written to swap .* GiB left free')
         self.assertEqual((files['output'], files['root/metadata/runners.jsonl']), ('', ''))
+
+    def test_cancellation_does_not_publish_status_or_leave_ninja_alive(self):
+        for signum in (signal.SIGINT, signal.SIGTERM):
+            with self.subTest(signal=signum), tempfile.TemporaryDirectory() as tmp:
+                tmp = Path(tmp)
+                root = tmp / 'root'
+                ninja = root / 'src/third_party/ninja/ninja'
+                ninja.parent.mkdir(parents=True)
+                ninja.write_text('#!/bin/sh\necho $$ > "$RUNNER_TEMP/ninja.pid"\nexec sleep 30\n')
+                ninja.chmod(0o755)
+                (tmp / 'chromium-job-start').write_text(str(int(build.monotonic_now())))
+                env = dict(os.environ, CR_ROOT=str(root), RUNNER_TEMP=str(tmp), STAGE='03',
+                           FINAL_STAGE='false', GITHUB_RUN_ATTEMPT='1', GITHUB_OUTPUT=str(tmp / 'output'),
+                           GITHUB_STEP_SUMMARY='')
+                with subprocess.Popen([sys.executable, str(ROOT / '.github/scripts/build.py')],
+                                      env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                      text=True) as proc:
+                    try:
+                        pidfile = tmp / 'ninja.pid'
+                        deadline = time.monotonic() + 4
+                        while not (pidfile.is_file() and pidfile.stat().st_size) and time.monotonic() < deadline:
+                            time.sleep(0.01)
+                        sid = int(pidfile.read_text())
+                        proc.send_signal(signum)
+                        _, stderr = proc.communicate(timeout=5)
+                        self.assertNotEqual(proc.returncode, 0)
+                        self.assertIn('NOT checkpointing', stderr)
+                        self.assertEqual((tmp / 'output').read_text(), '')
+                        self.assertEqual(build._live_session_pids(sid), [])
+                    finally:
+                        if proc.poll() is None:
+                            proc.terminate()
+                            proc.communicate(timeout=5)
 
     def test_resource_probes_never_raise(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -776,10 +816,10 @@ class Hardening(unittest.TestCase):
 
         with mock.patch.object(build.subprocess, 'Popen', return_value=_ExitedBeforeSigint()), \
              mock.patch.object(build.os, 'killpg', side_effect=ProcessLookupError), \
-             mock.patch.object(build, 'kill_session', return_value=[]):
+             mock.patch.object(build, 'kill_session', return_value=([], [])):
             self.assertEqual(build.supervise(['fake'], 0.1, 1), 'failed:2')
 
-        with mock.patch.object(build, 'kill_session', return_value=[42424]):
+        with mock.patch.object(build, 'kill_session', return_value=([], [42424])):
             self.assertEqual(
                 build.supervise([sys.executable, '-c', 'pass'], 5, 1),
                 'failed:lingering-processes(42424)',
@@ -979,7 +1019,7 @@ class Hardening(unittest.TestCase):
         stuck = _StuckNinja()
         with mock.patch.object(build.subprocess, 'Popen', return_value=stuck), \
              mock.patch.object(build.os, 'killpg'), \
-             mock.patch.object(build, 'kill_session', return_value=[77777]):
+             mock.patch.object(build, 'kill_session', return_value=([], [77777])):
             self.assertEqual(build.supervise(['fake'], 5, 1), 'failed:lingering-processes(77777)')
         self.assertGreaterEqual(stuck.polls, 1)
 
