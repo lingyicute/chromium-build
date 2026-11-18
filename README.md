@@ -40,6 +40,8 @@ README.md
 > [!tip]
 > 请不要在个人机器或已有数据的自托管 runner 上执行本项目的 `host.sh` / `pack.sh`。前者删除固定路径下的预装大型软件，并关闭、删除 `/mnt` 下已有的 swap 文件；后者会在打包成功读取各文件后删除整个本地构建树。 检测到这些清理路径或中转目录本身、其下方有独立挂载（含 bind mount）时会拒绝操作。
 
+归档测试使用 GNU tar 与 zstd；系统 PATH 中有 Ninja 时，还会用一个极小的本地工程验证中断后未完成的目标能续编、已完成的目标不会重做，不下载 Chromium。
+
 ## 运行
 
 打开 **Actions → Chromium Stable Android arm64 → Run workflow**。
