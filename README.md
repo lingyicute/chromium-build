@@ -1,6 +1,6 @@
 # Chromium Stable Build
 
-**仅使用 GitHub 官方 Actions 的分段构建方案。** 适用于 GitHub.com 的标准 `ubuntu-24.04` hosted runner；构建原版 Chromium `chrome_public_apk`。
+**仅使用 GitHub 官方 Actions 的分段构建方案。** 目标为 GitHub.com 的标准 `ubuntu-24.04` hosted runner，构建原版 Chromium `chrome_public_apk`。此方案依赖 runner 实际提供独立且够大的 `/mnt` 文件系统；GitHub 不保证该额外空间，环境不满足时会提前失败。
 
 ## 目录
 
@@ -12,6 +12,7 @@
     tests.yml                 # 每次 push 运行 tests/ 下的离线测试，不编译 Chromium
   scripts/
     common.sh                # 固定绝对路径、工具缓存位置与网络重试
+    runner.sh                # hosted VM、独立 /mnt、目录类型/内容预检
     host.sh                  # 临时 VM 清理、/ 上建 swap、资源检查，不安装系统包
     resolve.py               # 解析一次 Android Stable，验证 JSON
     fetch.sh                 # 源码与工具链锁定、同步、hooks、GN
@@ -124,6 +125,7 @@ Android stable 的版本不是写死的；每次新 workflow run 从官方 API �
 
 ## 故障与重跑
 
+- `/mnt` 不独立或空间不足：当前 VM 不满足布局要求；不要通过关闭检查把整个树塞进系统盘。
 - tag/SHA 不匹配：可能是上游发布记录/仓库更新的时间差，或元数据异常。检查官方记录，稍后启动新 run。
 - `gclient` / hooks 失败：源码 fetch、`gclient sync` 与 hooks 会针对同一官方来源和版本各自最多尝试 3 次（不切换镜像或版本）；仍失败时查看 prepare 日志，网络问题可以重跑。
 - `GN --fail-on-unused-args` 失败：新版上游可能调整参数，需要人工审查 `config/args.gn`。不静默忽略未知参数。

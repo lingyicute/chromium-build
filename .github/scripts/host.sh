@@ -3,10 +3,11 @@ set -Eeuo pipefail
 export LC_ALL=C.UTF-8 LANG=C.UTF-8 TZ=UTC
 export PATH="/usr/bin:/bin:/usr/sbin:/sbin"
 # Run ONLY on a fresh GitHub-hosted VM. Never use this cleanup on a personal host.
-[[ "${RUNNER_ENVIRONMENT:-}" == github-hosted ]] || { echo 'GitHub-hosted runner required' >&2; exit 1; }
+source "$(dirname "$0")/runner.sh"
+require_hosted_runner
 for cmd in sudo git tar zstd sha256sum timeout fallocate mkswap swapon swapoff \
   free df du find sort xargs tee chmod chown nproc cp rm rmdir mkdir mktemp ls \
-  cat id uname dirname tail sleep; do
+  cat id uname dirname tail sleep stat realpath; do
   command -v "$cmd" >/dev/null || { echo "Missing runner tool: $cmd; refusing apt/pip fallback" >&2; exit 1; }
 done
 [[ "$(uname -m)" == x86_64 ]] || { echo "Unsupported architecture: $(uname -m) (need x86_64)" >&2; exit 1; }
@@ -18,6 +19,18 @@ mkdir -p "${RUNNER_TEMP:?}/chromium-logs"
 [[ -x /usr/bin/python3 ]] || { echo 'Missing /usr/bin/python3; refusing apt/pip fallback' >&2; exit 1; }
 # Record monotonic boot time so NTP wall-clock adjustments cannot skew stage budgets.
 /usr/bin/python3 -c 'import time; print(int(time.clock_gettime(time.CLOCK_BOOTTIME)))' > "$RUNNER_TEMP/chromium-job-start"
+# Refuse an unexpected layout before any purge, chown or swap operation.
+require_relay_mount
+workdirs=(/mnt/chromium-relay /mnt/chromium-transfer)
+for workdir in "${workdirs[@]}"; do
+  if [[ -e "$workdir" || -L "$workdir" ]]; then
+    require_relay_directory "$workdir"
+    require_empty_directory "$workdir"
+  fi
+done
+if [[ -e /chromium-relay.swap || -L /chromium-relay.swap ]]; then
+  runner_fail 'Expected no pre-existing /chromium-relay.swap'
+fi
 # Disk layout: / (OS disk) receives the swap file; /mnt (the larger ephemeral
 # disk) is kept entirely for the Chromium tree and checkpoints. Freeing / is
 # what makes room for the swap below.
@@ -39,21 +52,22 @@ for dir in /usr/local/lib/android /usr/local/.ghcup /usr/share/dotnet \
   sudo rm -rf -- "$dir" &
   cleanup+=("$!")
 done
-sudo mkdir -p /mnt/chromium-relay /mnt/chromium-transfer
-for workdir in /mnt/chromium-relay /mnt/chromium-transfer; do
-  [[ -d "$workdir" && ! -L "$workdir" ]] || { echo "Refusing non-directory or symlink: $workdir" >&2; exit 1; }
-  sudo chown -h "$(id -u):$(id -g)" "$workdir"
-  existing=$(ls -A -- "$workdir")
-  [[ -z "$existing" ]] || { echo "Expected fresh empty runner directory: $workdir" >&2; exit 1; }
+sudo mkdir -p -- "${workdirs[@]}"
+for workdir in "${workdirs[@]}"; do
+  require_relay_directory "$workdir"
+  require_empty_directory "$workdir"
+  sudo chown -h "$(id -u):$(id -g)" -- "$workdir"
 done
 # The image ships its own swap file on /mnt; reclaim that space for the tree.
 swap_devs=$(swapon --show=NAME --noheadings --raw)
 while IFS= read -r dev; do
   [[ "$dev" == /mnt/* ]] || continue
-  sudo swapoff -- "$dev"
-  if [[ -f "$dev" && ! -L "$dev" ]]; then
-    sudo rm -f -- "$dev"
-  fi
+  # Do not disable or remove a device, symlink or file on another filesystem.
+  [[ -f "$dev" && ! -L "$dev" ]] || continue
+  real_dev=$(realpath -e -- "$dev")
+  [[ "$real_dev" == /mnt/* && "$(stat -c '%d' -- "$real_dev")" == "$relay_device" ]] || continue
+  sudo swapoff -- "$real_dev"
+  sudo rm -f -- "$real_dev"
 done <<< "$swap_devs"
 # Reap every background deletion before failing so none keep running on error.
 cleanup_failed=0
@@ -68,8 +82,7 @@ swap_gib=16
 root_free_gib=$(/usr/bin/python3 -c 'import shutil; print(shutil.disk_usage("/").free // 2**30)')
 (( root_free_gib - swap_gib >= 8 )) || swap_gib=$(( root_free_gib - 8 ))
 (( swap_gib >= 8 )) || { echo "Only ${root_free_gib} GiB free on / after cleanup; cannot place a >= 8 GiB swap file" >&2; exit 1; }
-sudo rm -f -- /chromium-relay.swap
-sudo bash -c 'umask 077 && exec fallocate -l "$1" /chromium-relay.swap' _ "${swap_gib}G"
+sudo bash -c 'set -o noclobber; umask 077; : > /chromium-relay.swap && exec fallocate -l "$1" /chromium-relay.swap' _ "${swap_gib}G"
 sudo chmod 600 /chromium-relay.swap
 sudo mkswap /chromium-relay.swap >/dev/null
 sudo swapon /chromium-relay.swap

@@ -37,11 +37,19 @@ unset GIT_CACHE_PATH CCACHE_DIR CCACHE_PREFIX GOOGLE_APPLICATION_CREDENTIALS \
   GIT_CONFIG_GLOBAL GIT_CONFIG_SYSTEM GIT_CONFIG_NOSYSTEM \
   GIT_CONFIG_PARAMETERS GIT_CONFIG_COUNT \
   GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_OBJECT_DIRECTORY \
-  GIT_ALTERNATE_OBJECT_DIRECTORIES GIT_CEILING_DIRECTORIES
+  GIT_ALTERNATE_OBJECT_DIRECTORIES GIT_CEILING_DIRECTORIES TAR_OPTIONS
 mkdir -p "$CR_LOGS" "$TMPDIR"
 trap 'echo "::error::Interrupted (signal INT), aborting" >&2; exit 130' INT
 trap 'echo "::error::Terminated (signal TERM), aborting" >&2; exit 143' TERM
 fail() { echo "::error::$*" >&2; exit 1; }
+# GNU find's -exec ... \; reports failure as a false predicate, not a failing
+# find exit code. Stop on that predicate explicitly, before traversing the dir.
+make_dirs_removable() {
+  local failed_dir
+  failed_dir=$(find "$1" -type d ! -perm -u+rwx ! -exec chmod u+rwx -- {} \; -print -quit) \
+    || fail "Could not traverse removable directories under $1"
+  [[ -z "$failed_dir" ]] || fail "Could not grant owner access to $failed_dir"
+}
 # Re-run an idempotent network step against the SAME official source and
 # revision; never falls back to another mirror, branch, or version.
 retry() {

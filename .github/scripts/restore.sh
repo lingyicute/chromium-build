@@ -2,9 +2,13 @@
 source "$(dirname "$0")/common.sh"
 # Verify restored tree using only OS tools, never restored depot_tools wrappers.
 export PATH="/usr/bin:/bin:/usr/sbin:/sbin"
-[[ -d "$CR_ROOT" && ! -L "$CR_ROOT" ]] || fail 'Restore destination must be a real directory'
-restore_entries=$(ls -A -- "$CR_ROOT")
-[[ -z "$restore_entries" ]] || fail 'Restore destination must be empty'
+source "$(dirname "$0")/runner.sh"
+require_hosted_runner
+require_relay_mount
+require_relay_directory "$CR_ROOT"
+require_relay_directory "$CR_TRANSFER"
+require_relay_directory "$CR_TRANSFER/checkpoint"
+require_empty_directory "$CR_ROOT"
 "$CR_PYTHON" "$GITHUB_WORKSPACE/.github/scripts/checkpoint.py" restore-stream "$CR_TRANSFER/checkpoint" \
   | zstd -d -c | tar --no-same-owner -xpf - -C "$CR_ROOT"
 "$CR_PYTHON" - <<'PY'

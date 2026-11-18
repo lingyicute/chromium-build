@@ -2,14 +2,18 @@
 source "$(dirname "$0")/common.sh"
 # Export using only OS tools, never depot_tools wrappers inside $CR_ROOT.
 export PATH="/usr/bin:/bin:/usr/sbin:/sbin"
-[[ "$CR_ROOT" == /mnt/chromium-relay && "$CR_TRANSFER" == /mnt/chromium-transfer ]] \
-  || fail 'Refusing destructive export outside the fixed /mnt checkpoint paths'
-[[ -d "$CR_ROOT" && ! -L "$CR_ROOT" ]] || fail 'Build root must be a real directory'
+source "$(dirname "$0")/runner.sh"
+require_hosted_runner
+require_relay_mount
+require_relay_directory "$CR_ROOT"
+require_relay_directory "$CR_TRANSFER"
 mkdir -p "$CR_TRANSFER/checkpoint"
-[[ -d "$CR_TRANSFER/checkpoint" && ! -L "$CR_TRANSFER/checkpoint" ]] \
-  || fail 'Checkpoint output must be a real directory'
-checkpoint_entries=$(ls -A -- "$CR_TRANSFER/checkpoint")
-[[ -z "$checkpoint_entries" ]] || fail 'Checkpoint output must be empty'
+require_relay_directory "$CR_TRANSFER/checkpoint"
+require_empty_directory "$CR_TRANSFER/checkpoint"
+: >> "${GITHUB_OUTPUT:?}"
+checkpoint_tool="${GITHUB_WORKSPACE:?}/.github/scripts/checkpoint.py"
+[[ -r "$checkpoint_tool" && -x "$CR_PYTHON" ]] || fail 'Checkpoint writer missing'
+command -v zstd >/dev/null || fail 'zstd missing'
 # IMPORTANT: destructive export on a disposable VM. No commands may use the
 # source tree afterwards. Each source file is removed after tar reads it, so a
 # full uncompressed tree + a full archive need not fit simultaneously.
@@ -18,7 +22,7 @@ checkpoint_entries=$(ls -A -- "$CR_TRANSFER/checkpoint")
 # Ensure restricted directories (e.g. from CIPD/third-party caches) grant u+rwx
 # before descending so tar --remove-files can traverse, unlink, and rmdir them;
 # chmod does not alter directory mtimes or regular file permission bits.
-find "$CR_ROOT" -type d ! -perm -u+rwx -exec chmod u+rwx {} \;
+make_dirs_removable "$CR_ROOT"
 # Remove stale Unix sockets (tar ignores sockets and then fails rmdir).
 find "$CR_ROOT" -mindepth 1 -type s -delete
 # Archive the ENTRIES of $CR_ROOT (dotglob covers .gclient etc.), never "."
@@ -32,10 +36,9 @@ hash=$(
     (( ${#entries[@]} > 0 )) && \
     tar --format=posix --pax-option=delete=atime,delete=ctime --remove-files -cf - -- "${entries[@]}" ) \
     | zstd -T"$(nproc)" -3 -c \
-    | "$CR_PYTHON" "$GITHUB_WORKSPACE/.github/scripts/checkpoint.py" pack-stream "$CR_TRANSFER/checkpoint"
+    | "$CR_PYTHON" "$checkpoint_tool" pack-stream "$CR_TRANSFER/checkpoint"
 )
 [[ "$hash" =~ ^[0-9a-f]{64}$ ]] || fail 'Invalid checkpoint SHA-256 output'
-leftover_entries=$(ls -A -- "$CR_ROOT")
-[[ -z "$leftover_entries" ]] || fail 'Destructive export left files behind in build root'
+require_empty_directory "$CR_ROOT"
 echo "sha256=$hash" >> "${GITHUB_OUTPUT:?}"
 du -sh "$CR_TRANSFER/checkpoint"
