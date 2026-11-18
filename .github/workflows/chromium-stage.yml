@@ -84,8 +84,9 @@ jobs:
         shell: bash
         run: |
           set -Eeuo pipefail
-          timeout --signal=INT --kill-after=120s 225m bash .github/scripts/fetch.sh 2>&1 \
-            | tee -i "$RUNNER_TEMP/chromium-logs/prepare.log"
+          # Use the step PID for timeout, which forwards cancellation to fetch.sh.
+          exec timeout --signal=INT --kill-after=120s 225m bash .github/scripts/fetch.sh \
+            > >(tee -i "$RUNNER_TEMP/chromium-logs/prepare.log") 2>&1
       - name: Save source resolution and GN configuration
         if: inputs.stage == '00'
         # A record only: the same metadata travels in the checkpoint and ships with the APK.
@@ -137,7 +138,7 @@ jobs:
         timeout-minutes: 330
         env:
           STAGE: ${{ inputs.stage }}
-        run: bash .github/scripts/build.sh
+        run: exec bash .github/scripts/build.sh
       - name: Verify APK signature and assemble output
         if: steps.build.outputs.status == 'completed'
         # The post-build steps are bounded so that even after an orderly final-stage

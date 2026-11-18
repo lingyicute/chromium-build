@@ -474,9 +474,19 @@ class Supervisor(unittest.TestCase):
                 env = dict(os.environ, CR_ROOT=str(root), RUNNER_TEMP=str(tmp), STAGE='03',
                            GITHUB_RUN_ATTEMPT='1', GITHUB_OUTPUT=str(tmp / 'output'),
                            GITHUB_STEP_SUMMARY='')
-                with subprocess.Popen([sys.executable, str(ROOT / '.github/scripts/build.py')],
-                                      env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                                      text=True) as proc:
+                # Exercise the actual step and wrapper. Only redirect the fixed build root
+                # after sourcing common.sh, so the fixture never writes to /mnt.
+                wrappers = tmp / '.github/scripts'
+                wrappers.mkdir(parents=True)
+                (wrappers / 'build.sh').write_bytes((ROOT / '.github/scripts/build.sh').read_bytes())
+                (wrappers / 'common.sh').write_text(
+                    'source "$GITHUB_WORKSPACE/.github/scripts/common.sh"\n'
+                    'export CR_ROOT="$RUNNER_TEMP/root"\n')
+                workflow = (ROOT / '.github/workflows/chromium-stage.yml').read_text()
+                step = re.search(r'^        run: (.+scripts/build\.sh)$', workflow, re.M)[1]
+                with subprocess.Popen(['bash', '-e', '-c', step], cwd=tmp,
+                                      env={**env, 'GITHUB_WORKSPACE': str(ROOT)},
+                                      stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True) as proc:
                     try:
                         pidfile = tmp / 'ninja.pid'
                         deadline = time.monotonic() + 4
@@ -484,9 +494,10 @@ class Supervisor(unittest.TestCase):
                             time.sleep(0.01)
                         sid = int(pidfile.read_text())
                         proc.send_signal(signum)
-                        _, stderr = proc.communicate(timeout=5)
+                        out, _ = proc.communicate(timeout=5)
                         self.assertNotEqual(proc.returncode, 0)
-                        self.assertIn('NOT checkpointing', stderr)
+                        self.assertIn('NOT checkpointing', out)
+                        self.assertEqual((tmp / 'chromium-logs/build.log').read_text(), out)
                         self.assertEqual((tmp / 'output').read_text(), '')
                         self.assertEqual(build._live_session_pids(sid), [])
                     finally:
@@ -929,7 +940,8 @@ class Hardening(unittest.TestCase):
         self.assertIn('\nenable_java_asserts = false\n', args_gn)
         self.assertIn('\ndebuggable_apks = false\n', args_gn)
         stage = (ROOT / '.github/workflows/chromium-stage.yml').read_text()
-        self.assertIn('| tee -i "$RUNNER_TEMP/chromium-logs/prepare.log"', stage)
+        self.assertIn('exec timeout --signal=INT --kill-after=120s 225m', stage)
+        self.assertIn('> >(tee -i "$RUNNER_TEMP/chromium-logs/prepare.log") 2>&1', stage)
 
     def test_release_apk_checks(self):
         import zipfile
