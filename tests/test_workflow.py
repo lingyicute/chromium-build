@@ -923,71 +923,73 @@ class Hardening(unittest.TestCase):
         import zipfile
 
         release_sh = (ROOT / '.github/scripts/release.sh').read_text()
-        script = re.search(r'"\$CR_PYTHON" - "\$apk" .* <<\'PY\'\n(.*?)\nPY\n', release_sh, re.S)[1]
+        script = ROOT / '.github/scripts/apk.py'
+        pin = ROOT / 'config/debug_signer_sha256.txt'
+        fingerprint = pin.read_text().strip()
+        elf = b'\x7fELF\x02\x01\x01' + bytes(9) + b'\x03\x00\xb7\x00'
+        dex = b'dex\n039\x00'
 
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             apk = root / 'ChromePublic.apk'
-            with zipfile.ZipFile(apk, 'w') as zf:
-                zf.writestr('AndroidManifest.xml', b'manifest')
-                zf.writestr('classes.dex', b'dex')
-                zf.writestr('lib/arm64-v8a/libchrome.so', b'elf')
             lock = root / 'build-lock.json'
             lock.write_text(json.dumps({'version': '158.0.8127.36'}))
             aapt2 = root / 'aapt2'
             aapt2.write_text('#!/bin/sh\nprintf "%s\\n" "$FAKE_BADGING"\n')
             aapt2.chmod(0o755)
             meta = root / 'meta.json'
+            signature = root / 'signature.txt'
+            valid_signer = f'Number of signers: 1\nSigner #1 certificate SHA-256 digest: {fingerprint}\n'
 
-            def run_check(badging, tool=aapt2):
+            def apk_fixture(dex_name='classes.dex', lib_name='lib/arm64-v8a/libchrome.so', lib=elf):
+                with zipfile.ZipFile(apk, 'w') as zf:
+                    zf.writestr('AndroidManifest.xml', b'manifest')
+                    zf.writestr(dex_name, dex)
+                    zf.writestr(lib_name, lib)
+
+            def run_check(badging, signer=valid_signer, tool=aapt2):
+                signature.write_text(signer)
                 return subprocess.run(
-                    [sys.executable, '-c', script, str(apk), str(lock), str(tool), str(meta)],
-                    env=dict(os.environ, FAKE_BADGING=badging),
-                    capture_output=True, text=True)
+                    [sys.executable, str(script), 'inspect', str(apk), str(lock), str(tool),
+                     str(signature), str(pin), str(meta)],
+                    env=dict(os.environ, FAKE_BADGING=badging), capture_output=True, text=True, timeout=5)
 
             good = ("package: name='org.chromium.chrome' versionCode='1234' versionName='158.0.8127.36'\n"
                     "sdkVersion:'29'\ntargetSdkVersion:'36'\nnative-code: 'arm64-v8a'")
+            apk_fixture()
             p = run_check(good)
             self.assertEqual(p.returncode, 0, p.stderr)
             self.assertEqual(json.loads(meta.read_text()),
                              {'package': 'org.chromium.chrome', 'version_code': '1234',
                               'min_sdk': '29', 'target_sdk': '36'})
 
-            p = run_check(good + '\napplication-debuggable')
-            self.assertNotEqual(p.returncode, 0)
-            self.assertIn('debuggable', p.stderr)
+            for badging, message in ((good + '\napplication-debuggable', 'debuggable'),
+                                     (good.split('\nnative-code:')[0], 'missing native-code'),
+                                     (good.replace('arm64-v8a', 'armeabi-v7a'), 'arm64-v8a'),
+                                     (good.replace('org.chromium.chrome', 'org.example.app'), 'package name'),
+                                     (good.replace('158.0.8127.36', '158.0.8127.99'), 'versionName mismatch'),
+                                     (good.replace("versionCode='1234' ", ''), 'positive versionCode')):
+                p = run_check(badging)
+                self.assertNotEqual(p.returncode, 0)
+                self.assertIn(message, p.stderr)
 
-            p = run_check("package: name='org.chromium.chrome' versionName='158.0.8127.36'")
-            self.assertNotEqual(p.returncode, 0)
-            self.assertIn('missing native-code', p.stderr)
-
-            p = run_check("package: name='org.chromium.chrome' versionName='158.0.8127.36'\nnative-code: 'armeabi-v7a'")
-            self.assertNotEqual(p.returncode, 0)
-            self.assertIn('arm64-v8a', p.stderr)
+            for logs in (valid_signer.replace(fingerprint, 'a' * 64),
+                         valid_signer.replace('signers: 1', 'signers: 2')):
+                p = run_check(good, signer=logs)
+                self.assertNotEqual(p.returncode, 0)
+                self.assertIn('pinned Chromium development signer', p.stderr)
 
             p = run_check(good, tool=root / 'missing-aapt2')
             self.assertNotEqual(p.returncode, 0)
             self.assertIn('aapt2 missing', p.stderr)
 
-            bad_dex = root / 'bad-dex.apk'
-            with zipfile.ZipFile(bad_dex, 'w') as zf:
-                zf.writestr('AndroidManifest.xml', b'manifest')
-                zf.writestr('assets/nested.dex', b'dex')
-                zf.writestr('lib/arm64-v8a/libchrome.so', b'elf')
-            p = subprocess.run([sys.executable, '-c', script, str(bad_dex), str(lock), str(aapt2), str(meta)],
-                               env=dict(os.environ, FAKE_BADGING=good), capture_output=True, text=True)
-            self.assertNotEqual(p.returncode, 0)
-            self.assertIn('classes.dex', p.stderr)
-
-            bad_so = root / 'bad-so.apk'
-            with zipfile.ZipFile(bad_so, 'w') as zf:
-                zf.writestr('AndroidManifest.xml', b'manifest')
-                zf.writestr('classes.dex', b'dex')
-                zf.writestr('lib/arm64-v8a/nested/libchrome.so', b'elf')
-            p = subprocess.run([sys.executable, '-c', script, str(bad_so), str(lock), str(aapt2), str(meta)],
-                               env=dict(os.environ, FAKE_BADGING=good), capture_output=True, text=True)
-            self.assertNotEqual(p.returncode, 0)
-            self.assertIn('native library', p.stderr)
+            for changes, message in (({'dex_name': 'assets/nested.dex'}, 'classes.dex'),
+                                     ({'lib_name': 'lib/arm64-v8a/nested/libchrome.so'}, 'native library'),
+                                     ({'lib': elf[:-2] + b'\x3e\x00'}, 'non-AArch64 shared object')):
+                apk_fixture(**changes)
+                p = run_check(good)
+                self.assertNotEqual(p.returncode, 0)
+                self.assertIn(message, p.stderr)
 
             summary_script = re.search(r"<<'SUMMARY_PY'\n(.*?)\nSUMMARY_PY\n", release_sh, re.S)[1]
             rel_dir = root / 'release'

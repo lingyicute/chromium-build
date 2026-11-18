@@ -1,11 +1,15 @@
 #!/usr/bin/env python3
-"""Stage a local APK before verification or diagnostic upload."""
+"""Stage and inspect the APK that will be uploaded by the workflow."""
+import json
 import os
 from pathlib import Path
+import re
 import shutil
 import stat
+import subprocess
 import sys
 import tempfile
+import zipfile
 
 
 def stage_apk(root, source, destination):
@@ -32,14 +36,94 @@ def stage_apk(root, source, destination):
             candidate.replace(destination)
 
 
+def inspect_signer(log, pin):
+    expected = pin.read_text(encoding='ascii').strip()
+    if not re.fullmatch(r'[0-9a-f]{64}', expected):
+        raise ValueError('Invalid development certificate SHA-256 pin')
+    trace = log.read_text(encoding='utf-8')
+    counts = re.findall(r'^Number of signers: ([0-9]+)[ \t]*$', trace, re.M)
+    hashes = re.findall(r'^Signer #([1-9][0-9]*) certificate SHA-256 digest: ([0-9a-fA-F]{64})[ \t]*$',
+                        trace, re.M)
+    if counts != ['1'] or len(hashes) != 1 or hashes[0][0] != '1' or hashes[0][1].lower() != expected:
+        raise ValueError('APK does not have exactly the pinned Chromium development signer')
+
+
+def inspect_zip(apk_path):
+    with zipfile.ZipFile(apk_path) as zf:
+        names = zf.namelist()
+        if len(set(names)) != len(names):
+            raise ValueError('APK contains duplicate ZIP entry names')
+        names = {info.filename for info in zf.infolist() if not info.is_dir() and info.file_size > 0}
+        if 'AndroidManifest.xml' not in names:
+            raise ValueError('APK missing non-empty AndroidManifest.xml')
+        if 'classes.dex' not in names:
+            raise ValueError('APK missing non-empty root classes.dex')
+        with zf.open('classes.dex') as dex:
+            if not re.fullmatch(rb'dex\n[0-9]{3}\x00', dex.read(8)):
+                raise ValueError('APK root classes.dex has an invalid DEX header')
+        libs = sorted(name for name in names if re.fullmatch(r'lib/arm64-v8a/[^/]+\.so', name))
+        if not libs:
+            raise ValueError('APK missing non-empty arm64-v8a native library')
+        for name in libs:
+            with zf.open(name) as lib:
+                header = lib.read(20)
+            # ELF64 little-endian, ET_DYN (shared object), EM_AARCH64 (183).
+            if header[:7] != b'\x7fELF\x02\x01\x01' or header[16:20] != b'\x03\x00\xb7\x00':
+                raise ValueError(f'APK has a non-AArch64 shared object in arm64-v8a: {name!r}')
+
+
+def inspect_badging(aapt2, apk_path, locked_version):
+    if not (aapt2.is_file() and os.access(aapt2, os.X_OK)):
+        raise ValueError('Chromium-managed Android build-tools aapt2 missing')
+    badging = subprocess.check_output([str(aapt2), 'dump', 'badging', str(apk_path)],
+                                      text=True, encoding='utf-8')
+    package_lines = re.findall(r'^package:[ \t]*([^\r\n]+)$', badging, re.M)
+    if len(package_lines) != 1:
+        raise ValueError('aapt2 output must contain exactly one package line')
+    fields = re.findall(r"(?:^|[ \t]+)([a-zA-Z]+)='([^']*)'", package_lines[0])
+    attrs = dict(fields)
+    if len(attrs) != len(fields):
+        raise ValueError('aapt2 package line has duplicate fields')
+    expected_package = 'org.chromium.chrome'  # config/args.gn
+    if attrs.get('name') != expected_package:
+        raise ValueError(f'APK package name must be {expected_package}')
+    if attrs.get('versionName') != locked_version:
+        raise ValueError(f"APK versionName mismatch: {attrs.get('versionName')!r} != {locked_version!r}")
+    if not re.fullmatch(r'[1-9][0-9]*', attrs.get('versionCode', '')):
+        raise ValueError('APK missing a positive versionCode')
+    if re.search(r'^application-debuggable\b', badging, re.M):
+        raise ValueError('APK must not be debuggable (android:debuggable=true)')
+    abi_lines = re.findall(r'^native-code:[ \t]*([^\r\n]+)$', badging, re.M)
+    if not abi_lines:
+        raise ValueError('aapt2 output missing native-code line')
+    if len(abi_lines) != 1 or 'arm64-v8a' not in re.findall(r"'([^']+)'", abi_lines[0]):
+        raise ValueError('APK native-code missing an unambiguous arm64-v8a declaration')
+    min_sdk = re.search(r"^sdkVersion:'([^']+)'", badging, re.M)
+    target_sdk = re.search(r"^targetSdkVersion:'([^']+)'", badging, re.M)
+    return dict(package=expected_package, version_code=attrs['versionCode'],
+                min_sdk=min_sdk[1] if min_sdk else None, target_sdk=target_sdk[1] if target_sdk else None)
+
+
+def inspect_apk(apk_path, lock_path, aapt2, log, pin, metadata):
+    lock = json.loads(lock_path.read_text(encoding='utf-8'))
+    inspect_signer(log, pin)
+    inspect_zip(apk_path)
+    meta = inspect_badging(aapt2, apk_path, lock['version'])
+    metadata.write_text(json.dumps(meta) + '\n', encoding='utf-8')
+
+
 def main():
-    if len(sys.argv) != 5 or sys.argv[1] != 'stage':
-        raise SystemExit('Usage: apk.py stage <build root> <source> <destination>')
-    stage_apk(*map(Path, sys.argv[2:]))
+    match sys.argv[1:]:
+        case ['stage', *paths] if len(paths) == 3:
+            stage_apk(*map(Path, paths))
+        case ['inspect', *paths] if len(paths) == 6:
+            inspect_apk(*map(Path, paths))
+        case _:
+            raise SystemExit('Usage: apk.py stage ROOT SOURCE DEST | inspect APK LOCK AAPT2 SIGNATURE PIN META')
 
 
 if __name__ == '__main__':
     try:
         main()
-    except (OSError, ValueError) as exc:
-        raise SystemExit(f'APK staging failed: {exc}') from exc
+    except (OSError, KeyError, ValueError, zipfile.BadZipFile, subprocess.CalledProcessError) as exc:
+        raise SystemExit(f'APK publication check failed: {exc}') from exc
