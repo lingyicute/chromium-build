@@ -119,7 +119,7 @@ Android stable 的版本不是写死的；每次新 workflow run 从官方 API �
 |---|---|
 | `apk-` | `Chromium-Stable-arm64.apk`、`apk-signature.txt`、`SHA256SUMS`、`metadata/` |
 | `unverified-apk-` | 仅在编译完成、原始 APK 已安全暂存但后续步骤失败时可能出现：未经验证的原始 APK，仅供排查，不要安装或分发；只保留 3 天 |
-| `source-lock-` | 初始版本/源码/工具链锁定记录、DEPS、GN 参数、依赖列表 |
+| `source-lock-` | 初始版本/源码/工具链锁定记录、DEPS、GN 参数、声明的依赖与实际检出的 Git 提交列表 |
 | `logs-` | 资源信息与编译日志 |
 | `tree-` | 续编译检查点，不是安装包；只保留 3 天。每段都会上传完整树，一次跑满 8 段的 run 检查点总量可达 200 GB 以上 |
 

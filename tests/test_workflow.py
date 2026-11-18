@@ -560,6 +560,12 @@ class Retry(unittest.TestCase):
                      'gclient sync', 'gclient runhooks'):
             self.assertIn('\nretry ' + step, fetch)
 
+    def test_fetch_records_declared_dependencies_and_actual_git_revisions(self):
+        fetch = (ROOT / '.github/scripts/fetch.sh').read_text()
+        self.assertIn('gclient revinfo > "$CR_ROOT/metadata/dependencies.txt"', fetch)
+        self.assertIn('gclient revinfo --actual --ignore-dep-type=cipd --ignore-dep-type=gcs', fetch)
+        self.assertIn('> "$CR_ROOT/metadata/git-dependencies.txt"', fetch)
+
 
 class StaticPolicy(unittest.TestCase):
     def test_actions(self):

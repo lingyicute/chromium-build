@@ -46,6 +46,10 @@ retry gclient sync --nohooks --no-history --revision "src@$revision" --jobs=8
 retry gclient runhooks
 "$CR_PYTHON" "$source_state" verify-source
 gclient revinfo > "$CR_ROOT/metadata/dependencies.txt"
+# The declared list may contain refs and package tags. Record the actual
+# checked-out Git commits separately, without CIPD describe/network lookups.
+gclient revinfo --actual --ignore-dep-type=cipd --ignore-dep-type=gcs \
+  > "$CR_ROOT/metadata/git-dependencies.txt"
 cp "$CR_ROOT/src/DEPS" "$CR_ROOT/metadata/DEPS"
 mkdir -p "$CR_ROOT/src/out/Release"
 cp "$GITHUB_WORKSPACE/config/args.gn" "$CR_ROOT/src/out/Release/args.gn"
