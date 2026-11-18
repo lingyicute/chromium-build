@@ -1,10 +1,12 @@
 #!/usr/bin/env bash
 source "$(dirname "$0")/common.sh"
 release="$RUNNER_TEMP/chromium-release"
-rm -rf -- "$release"
-mkdir -p "$release"
-apk="$CR_ROOT/src/out/Release/apks/ChromePublic.apk"
-[[ -f "$apk" && ! -L "$apk" && -s "$apk" ]] || fail 'Ninja succeeded but ChromePublic.apk is missing'
+inspection="$RUNNER_TEMP/chromium-inspection"
+rm -rf -- "$release" "$inspection"
+mkdir -m 700 -- "$release" "$inspection"
+source_apk="$CR_ROOT/src/out/Release/apks/ChromePublic.apk"
+apk="$inspection/ChromePublic.apk"
+"$CR_PYTHON" "$GITHUB_WORKSPACE/.github/scripts/apk.py" stage "$CR_ROOT" "$source_apk" "$apk"
 # Verify with SDK/JDK distributed through Chromium DEPS, not runner Android SDK.
 build_tools_root="$CR_ROOT/src/third_party/android_sdk/public/build-tools"
 [[ -d "$build_tools_root" ]] || fail 'Chromium-managed Android build-tools directory missing'
@@ -77,10 +79,16 @@ meta = {
 }
 meta_out.write_text(json.dumps(meta) + '\n', encoding='utf-8')
 PY
-cp "$apk" "$release/Chromium-Stable-arm64.apk"
+# Both directories are on RUNNER_TEMP. Publish the very bytes that were checked.
+ln -- "$apk" "$release/Chromium-Stable-arm64.apk"
+# The upload action omits hidden files; reject hidden or non-regular metadata
+# rather than publishing a checksum set that does not match the artifact.
+[[ -d "$CR_ROOT/metadata" && ! -L "$CR_ROOT/metadata" ]] || fail 'Build metadata directory missing'
+invalid=$(find "$CR_ROOT/metadata" -mindepth 1   \( -name '.*' -o ! \( -type f -o -type d \) \) -printf 'invalid' -quit)
+[[ -z "$invalid" ]] || fail 'Build metadata contains hidden or non-regular entries'
 cp -a "$CR_ROOT/metadata" "$release/metadata"
 # SHA256SUMS authenticates nothing on its own; it detects corruption only.
-(cd "$release" && find . -type f ! -name SHA256SUMS -printf '%P\0' | sort -z | xargs -0r sha256sum -- > SHA256SUMS)
+(cd "$release" && find . -type f ! -path './SHA256SUMS' -printf '%P\0' | sort -z | xargs -0r sha256sum -- > SHA256SUMS)
 [[ -s "$release/SHA256SUMS" ]] || fail 'Failed to generate SHA256SUMS'
 if [[ -n "${GITHUB_STEP_SUMMARY:-}" ]]; then
 "$CR_PYTHON" - "$release" "$apk_meta" "$GITHUB_STEP_SUMMARY" <<'SUMMARY_PY'

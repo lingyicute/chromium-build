@@ -608,10 +608,10 @@ class StaticPolicy(unittest.TestCase):
         self.assertIn("\n        if: failure() && steps.build.outputs.status == 'completed'\n", step)
         self.assertIn('\n          name: unverified-apk-', step)
         self.assertNotIn('continue-on-error', step)
-        # Same file release.sh verifies ($CR_ROOT is fixed in common.sh).
-        self.assertIn('\n          path: /mnt/chromium-relay/src/out/Release/apks/ChromePublic.apk\n', step)
+        # A staged copy of the same regular file release.sh verifies.
+        self.assertIn('\n          path: ${{ runner.temp }}/chromium-inspection/ChromePublic.apk\n', step)
         self.assertIn('export CR_ROOT=/mnt/chromium-relay\n', (ROOT / '.github/scripts/common.sh').read_text())
-        self.assertIn('apk="$CR_ROOT/src/out/Release/apks/ChromePublic.apk"\n',
+        self.assertIn('source_apk="$CR_ROOT/src/out/Release/apks/ChromePublic.apk"\n',
                       (ROOT / '.github/scripts/release.sh').read_text())
 
     @staticmethod
