@@ -9,6 +9,7 @@ import re
 import signal
 import stat
 import subprocess
+import sys
 import time
 
 # Exit statuses Ninja returns after handling SIGINT itself (it removes the
@@ -83,6 +84,13 @@ def _has_live_thread(proc_dir):
     return False
 
 
+def _is_live_proc(proc_dir, fields):
+    if fields[0] not in DEAD_PROC_STATES:
+        return True
+    return (fields[0] == 'Z' and len(fields) > 17 and _is_ascii_uint(fields[17])
+            and int(fields[17]) > 1 and _has_live_thread(proc_dir))
+
+
 def _proc_fields(proc_dir):
     raw = (proc_dir / 'stat').read_text(encoding='utf-8', errors='replace')
     # Fields after the ")" closing comm: state ppid pgrp session ... num_threads(17).
@@ -119,13 +127,6 @@ def enable_orphan_tracking():
 def _is_adopted(pid, fields, protected_children):
     return (protected_children is not None and fields[1] == str(os.getpid())
             and pid not in protected_children)
-
-
-def _is_live_proc(proc_dir, fields):
-    if fields[0] not in DEAD_PROC_STATES:
-        return True
-    return (fields[0] == 'Z' and len(fields) > 17 and _is_ascii_uint(fields[17])
-            and int(fields[17]) > 1 and _has_live_thread(proc_dir))
 
 
 def _belongs_to_build(pid, fields, sid, protected_children):
@@ -265,6 +266,14 @@ def supervise(command, seconds, grace=STOP_GRACE_SECONDS, env=None, cancel_signa
     return result
 
 
+def log_status(line):
+    """Best-effort supervisor log; a dead log tee must not abort a finished stage."""
+    try:
+        print(line, flush=True)
+    except OSError:
+        pass
+
+
 def append_runner_record(root, stage, record):
     meta_dir = root / 'metadata'
     if meta_dir.is_symlink():
@@ -389,7 +398,7 @@ def main():
     os.chdir(root / 'src')
     env = dict(os.environ)
     env.setdefault('NINJA_STATUS', '[%f/%t %es] ')
-    print(f'Building locally, jobs={jobs}, budget={remaining/60:.0f} minutes, final={final_stage}', flush=True)
+    log_status(f'Building locally, jobs={jobs}, budget={remaining/60:.0f} minutes, final={final_stage}')
     t0 = monotonic_now()
     swap_before = swapped_out_bytes()
     status = supervise(['third_party/ninja/ninja', '-C', 'out/Release',
@@ -419,10 +428,18 @@ def main():
     check_cancelled(cancel_signal)
     with open(output_path, 'a', encoding='utf-8') as f:
         f.write(f'status={status}\n')
-    print(f'Stage result: {status} ({elapsed:.1f}s)', flush=True)
+    log_status(f'Stage result: {status} ({elapsed:.1f}s)')
     summarize(f'- Stage {stage}: `{status}` after compiling for {elapsed / 60:.1f} min with -j{jobs}; '
               f'setup before compiling (runner prep, then fetch or download and restore) took {setup / 60:.1f} min.')
     summarize(f'- Stage {stage} resources: {usage}.')
+    try:
+        sys.stdout.flush()
+    except OSError:
+        devnull = os.open(os.devnull, os.O_WRONLY)
+        try:
+            os.dup2(devnull, sys.stdout.fileno())
+        finally:
+            os.close(devnull)
 
 
 if __name__ == '__main__':
