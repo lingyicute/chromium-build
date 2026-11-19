@@ -70,10 +70,23 @@ def _open_regular_ro(path):
         st = os.fstat(fd)
         if not stat.S_ISREG(st.st_mode):
             raise ValueError(BAD_LAYOUT)
+        os.set_blocking(fd, True)
         return os.fdopen(fd, 'rb')
     except BaseException:
         os.close(fd)
         raise
+
+
+def _read_exact(stream, buf):
+    total = 0
+    while total < len(buf):
+        n = stream.readinto(buf[total:])
+        if n == 0:
+            return False
+        if n is None or not 0 < n <= len(buf) - total:
+            raise OSError('Invalid read from checkpoint part')
+        total += n
+    return True
 
 
 def _manifest_bytes(directory):
@@ -128,7 +141,7 @@ def _verify_and_open(path, entry):
         prefixes = []
         while remaining:
             block = view[:min(remaining, len(view))]
-            if f.readinto(block) != len(block):
+            if not _read_exact(f, block):
                 raise ValueError(MISMATCH)
             h.update(block)
             # These prefix digests are trusted only if the whole part matches
@@ -272,7 +285,7 @@ def restore_stream(directory, expected, out_stream):
                     remaining = expected_size
                     for prefix in prefixes:
                         block = view[:min(remaining, len(view))]
-                        if f.readinto(block) != len(block):
+                        if not _read_exact(f, block):
                             raise ValueError(MISMATCH)
                         h.update(block)
                         if not hmac.compare_digest(h.copy().digest(), prefix):
