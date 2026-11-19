@@ -326,7 +326,7 @@ def main():
         raise ValueError('Usage: checkpoint.py <hash|pack-stream|restore-stream> <directory> [--chunk-size N]')
     operation, directory = args[0], args[1]
     if operation == 'hash' and len(args) == 2:
-        print(digest(directory))
+        print(digest(directory), flush=True)
     elif operation == 'pack-stream' and len(args) in (2, 4):
         chunk_size = CHUNK_SIZE
         if len(args) == 4:
@@ -340,7 +340,7 @@ def main():
         elapsed = max(time.monotonic() - t0, 1e-6)
         rate = total / (1024 * 1024) / elapsed
         report(f'Packed {count} checkpoint part(s), {total} bytes ({total / 2**30:.2f} GiB) in {elapsed:.1f}s ({rate:.1f} MiB/s)')
-        print(sha256)
+        print(sha256, flush=True)
     elif operation == 'restore-stream' and len(args) == 2:
         t0 = time.monotonic()
         count, total = restore_stream(directory, os.environ.get('EXPECTED_SHA256', ''), sys.stdout.buffer)
