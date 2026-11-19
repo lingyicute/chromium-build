@@ -3,6 +3,7 @@
 import os
 from pathlib import Path
 import re
+import stat
 import subprocess
 import sys
 
@@ -13,16 +14,41 @@ REVISION = re.compile(r'[0-9a-f]{40}')
 VERSION_FIELDS = ('MAJOR', 'MINOR', 'BUILD', 'PATCH')
 
 
-def read_metadata_json(path):
-    with path.open('rb') as source:
-        raw = source.read(MAX_BYTES + 1)
-    if len(raw) > MAX_BYTES:
+def open_regular_file(path, root=None):
+    if root is not None:
+        if root.is_symlink() or not root.is_dir():
+            raise ValueError('Build root must be a real directory')
+        resolved_root = root.resolve(strict=True)
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    try:
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode):
+            raise ValueError(f'Expected regular file: {path.name}')
+        if root is not None:
+            opened = Path(f'/proc/self/fd/{fd}').resolve(strict=True)
+            if not opened.is_relative_to(resolved_root):
+                raise ValueError(f'Path resolves outside build tree: {path.name}')
+        os.set_blocking(fd, True)
+        return os.fdopen(fd, 'rb')
+    except BaseException:
+        os.close(fd)
+        raise
+
+
+def read_bounded_bytes(path, limit=MAX_BYTES, root=None):
+    with open_regular_file(path, root=root) as source:
+        raw = source.read(limit + 1)
+    if len(raw) > limit:
         raise ValueError(f'Oversized build metadata: {path.name}')
-    return parse_release_json(raw)
+    return raw
+
+
+def read_metadata_json(path, root=None):
+    return parse_release_json(read_bounded_bytes(path, limit=MAX_BYTES, root=root))
 
 
 def read_lock(root, workspace):
-    lock = read_metadata_json(root / 'metadata/build-lock.json')
+    lock = read_metadata_json(root / 'metadata/build-lock.json', root=root)
     if not isinstance(lock, dict):
         raise ValueError('Invalid build-lock.json')
     repository, workflow_sha, run_id = (os.environ[key] for key in
@@ -43,13 +69,14 @@ def read_lock(root, workspace):
     version = lock.get('version')
     if not isinstance(version, str) or not VERSION_PATTERN.fullmatch(version):
         raise ValueError('Invalid version in build-lock.json')
-    if validate(read_metadata_json(root / 'metadata/chromiumdash.json')) != (version, revision):
+    if validate(read_metadata_json(root / 'metadata/chromiumdash.json', root=root)) != (version, revision):
         raise ValueError('ChromiumDash snapshot does not match the build lock')
     return lock
 
 
 def verify_source(root, lock):
-    git_env = dict(os.environ, GIT_CEILING_DIRECTORIES=str(root))
+    resolved_root = root.resolve(strict=True)
+    git_env = dict(os.environ, GIT_CEILING_DIRECTORIES=str(resolved_root))
     for directory, field in (('src', 'chromium_revision'), ('depot_tools', 'depot_tools_revision')):
         repo = root / directory
         gitdir = repo / '.git'
@@ -71,7 +98,8 @@ def verify_source(root, lock):
             raise ValueError(f'{directory} has tracked changes at the locked revision')
 
     version = {}
-    for line in (root / 'src/chrome/VERSION').read_text(encoding='utf-8').splitlines():
+    raw_version = read_bounded_bytes(root / 'src/chrome/VERSION', root=root).decode('utf-8')
+    for line in raw_version.splitlines():
         if line.lstrip().startswith('#'):
             continue
         key, _, value = line.partition('=')
@@ -92,7 +120,7 @@ def verify_source(root, lock):
 def verify_restore(root, workspace, stage):
     if not re.fullmatch(r'0[1-8]', stage):
         raise ValueError('Invalid restore STAGE')
-    with (root / 'metadata/runners.jsonl').open('rb') as history:
+    with open_regular_file(root / 'metadata/runners.jsonl', root=root) as history:
         for n in range(int(stage)):
             line = history.readline(16 * 1024 + 1)
             if not line.endswith(b'\n') or len(line) > 16 * 1024:
@@ -105,13 +133,21 @@ def verify_restore(root, workspace, stage):
             raise ValueError(f'Checkpoint has unexpected stages for resuming {stage}')
     expected_args = (workspace / 'config/args.gn').read_bytes()
     for args_path in ('src/out/Release/args.gn', 'metadata/args.gn'):
-        if (root / args_path).read_bytes() != expected_args:
+        try:
+            actual_args = read_bounded_bytes(root / args_path, limit=max(MAX_BYTES, len(expected_args)), root=root)
+        except (OSError, ValueError) as exc:
+            raise ValueError(f'Invalid GN arguments file {args_path}: {exc}') from exc
+        if actual_args != expected_args:
             raise ValueError(f'GN arguments changed: {args_path}')
-    if not (root / 'src/out/Release/build.ninja').is_file():
-        raise ValueError('Restored build tree is missing out/Release/build.ninja')
+    try:
+        with open_regular_file(root / 'src/out/Release/build.ninja', root=root):
+            pass
+    except (OSError, ValueError) as exc:
+        raise ValueError('Restored build tree is missing out/Release/build.ninja') from exc
+    resolved_root = root.resolve(strict=True)
     for rel_tool in ('src/buildtools/linux64/gn', 'src/third_party/ninja/ninja'):
         tool = root / rel_tool
-        if not (tool.is_file() and tool.resolve().is_relative_to(root.resolve()) and os.access(tool, os.X_OK)):
+        if not (tool.is_file() and tool.resolve().is_relative_to(resolved_root) and os.access(tool, os.X_OK)):
             raise ValueError(f'Restored build tree is missing executable {rel_tool[4:]} within the tree')
 
 
