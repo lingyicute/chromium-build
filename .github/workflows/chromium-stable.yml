@@ -100,6 +100,7 @@ jobs:
     permissions: {}
     steps:
       - name: Fail unless a stage actually completed
+        timeout-minutes: 2
         env:
           NEEDS_JSON: ${{ toJSON(needs) }}
         shell: bash
@@ -109,6 +110,7 @@ jobs:
           raw_needs = json.loads(os.environ['NEEDS_JSON'])
           needs = raw_needs if isinstance(raw_needs, dict) else {}
           order = ['prepare'] + [f'part-{i:02d}' for i in range(1, 9)]
+          output_keys = ('status', 'artifact-id', 'apk-id', 'sha256')
           def stage_job(name):
               job = needs.get(name)
               return job if isinstance(job, dict) else {}
@@ -123,31 +125,41 @@ jobs:
               return stage_output(name, 'status')
           def valid_artifact_id(value):
               return bool(re.fullmatch(r'[1-9][0-9]{0,15}', value) and int(value) <= 9007199254740991)
+          def clean_skipped(name):
+              return stage_result(name) == 'skipped' and all(stage_output(name, k) == '' for k in output_keys)
           def successful_checkpoint(name):
               return (stage_result(name) == 'success' and stage_status(name) == 'running'
                       and valid_artifact_id(stage_output(name, 'artifact-id'))
-                      and re.fullmatch(r'[0-9a-f]{64}', stage_output(name, 'sha256')) is not None)
+                      and re.fullmatch(r'[0-9a-f]{64}', stage_output(name, 'sha256')) is not None
+                      and stage_output(name, 'apk-id') == '')
           def cell(text):
-              return text.replace('`', '').replace('|', '/').replace('\r', ' ').replace('\n', ' ')
+              return text.replace('`', '').replace('|', '/').replace('\r', ' ').replace('\n', ' ').strip() or '-'
           errors = [name for name in order if stage_result(name) in ('failure', 'cancelled')]
           completed = [name for name in order if stage_status(name) == 'completed']
           exhausted = (stage_result(order[-1]) == 'success' and stage_status(order[-1]) == 'exhausted'
+                       and stage_output(order[-1], 'artifact-id') == ''
+                       and stage_output(order[-1], 'apk-id') == ''
+                       and stage_output(order[-1], 'sha256') == ''
                        and all(successful_checkpoint(n) for n in order[:-1]))
           if len(completed) == 1:
               idx = order.index(completed[0])
               ok = (stage_result(completed[0]) == 'success'
                     and valid_artifact_id(stage_output(completed[0], 'apk-id'))
+                    and stage_output(completed[0], 'artifact-id') == ''
+                    and stage_output(completed[0], 'sha256') == ''
                     and all(successful_checkpoint(n) for n in order[:idx])
-                    and all(stage_result(n) == 'skipped' and stage_status(n) == '' for n in order[idx + 1:]))
+                    and all(clean_skipped(n) for n in order[idx + 1:]))
           else:
               ok = False
 
           if ok:
               reason = f'APK completed in `{completed[0]}`; see the `apk-*` artifact.'
-          elif stage_result('prepare') == 'skipped':
+          elif all(clean_skipped(n) for n in order):
               reason = 'FAILED: `prepare` was skipped (workflow may only run from the default branch).'
           elif len(completed) > 1:
               reason = 'FAILED: multiple stages reported `completed`: ' + ', '.join(completed) + '.'
+          elif len(completed) == 1 and stage_result(completed[0]) == 'cancelled':
+              reason = f'FAILED: `{completed[0]}` was cancelled after building the APK, before publication completed.'
           elif len(completed) == 1 and stage_result(completed[0]) != 'success':
               reason = (f'FAILED: `{completed[0]}` built the APK, but verifying or uploading it failed; '
                         'an `unverified-apk-*` artifact may remain, for inspection only.')
