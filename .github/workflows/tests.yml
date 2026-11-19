@@ -17,10 +17,13 @@ jobs:
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        timeout-minutes: 2
         with:
           persist-credentials: false
           fetch-depth: 1
       - name: Run tests on the image and system Python the build stages use
+        timeout-minutes: 3
+        shell: bash
         run: |
           command -v zstd
           /usr/bin/python3 -m unittest discover -s tests -v
