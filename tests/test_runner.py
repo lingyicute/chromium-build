@@ -35,7 +35,8 @@ class RunnerGuards(unittest.TestCase):
         baseline = '1 0 8:1 / / rw - ext4 /dev/sda rw\n2 1 8:2 / /mnt rw - ext4 /dev/sdb rw\n'
         directory = '/mnt/test relay'
         targets = (('/mnt/test\\040relayed', True), ('/mnt/test\\040relay', False),
-                   ('/mnt/test\\040relay/source\\011files', False))
+                   ('/mnt/test\\040relay/source\\011files', False),
+                   ('/mnt/test\\040relay/0', False), ('/mnt/test\\134040relay', True))
         for target, allowed in targets:
             with self.subTest(target=target):
                 mountinfo = baseline + f'3 2 8:2 /bind-source {target} rw - ext4 /dev/sdb rw\n'
@@ -44,6 +45,31 @@ class RunnerGuards(unittest.TestCase):
                 self.assertEqual(result.returncode == 0, allowed, result.stderr)
                 if not allowed:
                     self.assertIn('Refusing mount at or below /mnt/test relay', result.stderr)
+
+        digit_mount = baseline + '3 2 8:2 /bind-source /mnt/dir\\0401/sub rw - ext4 /dev/sdb rw\n'
+        result = subprocess.run(['bash', '-euc', command, '_', str(SCRIPTS), '/mnt/dir 1/'],
+                                input=digit_mount, capture_output=True, text=True, timeout=5)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('Refusing mount at or below /mnt/dir 1', result.stderr)
+
+        for bad in (baseline + '3 2 8:2 /s /mnt/bad\\c rw - ext4 /dev/sdb rw\n',
+                    baseline + '3 2 8:2 /s /mnt/no-separator rw\n',
+                    baseline + '3 2 8:2 /s /mnt/test\\040relay rw - ext4 /dev/sdb rw'):
+            result = subprocess.run(['bash', '-euc', command, '_', str(SCRIPTS), directory],
+                                    input=bad, capture_output=True, text=True, timeout=5)
+            self.assertNotEqual(result.returncode, 0)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            real_parent = Path(tmp) / 'real'
+            real_parent.mkdir()
+            link_parent = Path(tmp) / 'alias'
+            link_parent.symlink_to(real_parent, target_is_directory=True)
+            resolved = subprocess.run(
+                ['bash', '-euc', 'source "$1/runner.sh"; resolve_mount_parent out "$2"; printf "%s" "$out"',
+                 '_', str(SCRIPTS), str(link_parent / 'android/sub')],
+                capture_output=True, text=True, check=True, timeout=5,
+            )
+            self.assertEqual(resolved.stdout, str(real_parent.resolve() / 'android/sub'))
 
     def test_trailing_newlines_do_not_hide_directory_entries(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -71,5 +97,18 @@ class RunnerGuards(unittest.TestCase):
                 'source "$1/common.sh"; export PATH="${2%/*}:$PATH"; '
                 'make_dirs_removable "$2"', target, RUNNER_TEMP=tmp,
             )
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn('Could not grant owner access', result.stderr)
+
+            newline_dir = Path(tmp) / 'nl' / '\n'
+            newline_dir.mkdir(parents=True)
+            newline_dir.chmod(0o555)
+            result = subprocess.run(
+                ['bash', '-euc', 'source "$1/common.sh"; export PATH="$2:$PATH"; make_dirs_removable "$3"',
+                 '_', str(SCRIPTS), str(tmp), '\n'],
+                cwd=newline_dir.parent, env={**os.environ, 'RUNNER_TEMP': tmp},
+                capture_output=True, text=True, timeout=5,
+            )
+            newline_dir.chmod(0o755)
             self.assertNotEqual(result.returncode, 0)
             self.assertIn('Could not grant owner access', result.stderr)
