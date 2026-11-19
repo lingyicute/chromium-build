@@ -49,14 +49,14 @@ reap_cleanup() {
 }
 trap reap_cleanup EXIT
 for dir in "${purge_dirs[@]}"; do
-  sudo rm -rf --one-file-system -- "$dir" &
+  sudo -n rm -rf --one-file-system -- "$dir" &
   cleanup+=("$!")
 done
-sudo mkdir -p -- "${workdirs[@]}"
+sudo -n mkdir -p -- "${workdirs[@]}"
 for workdir in "${workdirs[@]}"; do
   require_relay_directory "$workdir"
   require_empty_directory "$workdir"
-  sudo chown -h "$(id -u):$(id -g)" -- "$workdir"
+  sudo -n chown -h "$(id -u):$(id -g)" -- "$workdir"
 done
 # The image ships its own swap file on /mnt; reclaim that space for the tree.
 swap_devs=$(swapon --show=NAME --noheadings --raw)
@@ -66,8 +66,8 @@ while IFS= read -r dev; do
   [[ -f "$dev" && ! -L "$dev" ]] || continue
   real_dev=$(realpath -e -- "$dev")
   [[ "$real_dev" == /mnt/* && "$(stat -c '%d' -- "$real_dev")" == "$relay_device" ]] || continue
-  sudo swapoff -- "$real_dev"
-  sudo rm -f -- "$real_dev"
+  sudo -n swapoff -- "$real_dev"
+  sudo -n rm -f -- "$real_dev"
 done <<< "$swap_devs"
 # Reap every background deletion before failing so none keep running on error.
 cleanup_failed=0
@@ -82,12 +82,12 @@ swap_gib=16
 root_free_gib=$(/usr/bin/python3 -c 'import shutil; print(shutil.disk_usage("/").free // 2**30)')
 (( root_free_gib - swap_gib >= 8 )) || swap_gib=$(( root_free_gib - 8 ))
 (( swap_gib >= 8 )) || { echo "Only ${root_free_gib} GiB free on / after cleanup; cannot place a >= 8 GiB swap file" >&2; exit 1; }
-sudo bash -c 'set -o noclobber; umask 077; : > /chromium-relay.swap && exec fallocate -l "$1" /chromium-relay.swap' _ "${swap_gib}G"
-sudo chmod 600 /chromium-relay.swap
-sudo mkswap /chromium-relay.swap >/dev/null
-sudo swapon /chromium-relay.swap
+sudo -n bash -c 'set -o noclobber; umask 077; : > /chromium-relay.swap && exec fallocate -l "$1" /chromium-relay.swap' _ "${swap_gib}G"
+sudo -n chmod 600 /chromium-relay.swap
+sudo -n mkswap /chromium-relay.swap >/dev/null
+sudo -n swapon /chromium-relay.swap
 if [[ -e /proc/sys/vm/swappiness ]]; then
-  printf '10\n' | sudo tee /proc/sys/vm/swappiness >/dev/null
+  printf '10\n' | sudo -n tee /proc/sys/vm/swappiness >/dev/null
 fi
 /usr/bin/python3 - <<'PY'
 import shutil
