@@ -12,14 +12,14 @@ version="${lock[0]}"; revision="${lock[1]}"; depot_revision="${lock[2]}"
 git init "$CR_ROOT/src"
 git -C "$CR_ROOT/src" remote add origin https://chromium.googlesource.com/chromium/src.git
 retry git -C "$CR_ROOT/src" -c fetch.fsckObjects=true fetch --no-tags --depth=1 origin "refs/tags/$version"
-[[ "$(git -C "$CR_ROOT/src" rev-parse 'FETCH_HEAD^{commit}')" == "$revision" ]] || fail 'Stable tag/ChromiumDash commit mismatch'
+[[ "$(git -C "$CR_ROOT/src" rev-parse --verify 'FETCH_HEAD^{commit}')" == "$revision" ]] || fail 'Stable tag/ChromiumDash commit mismatch'
 git -C "$CR_ROOT/src" checkout --detach "$revision"
-[[ "$(git -C "$CR_ROOT/src" rev-parse HEAD)" == "$revision" ]] || fail 'Chromium source checkout revision mismatch'
+[[ "$(git -C "$CR_ROOT/src" rev-parse --verify HEAD)" == "$revision" ]] || fail 'Chromium source checkout revision mismatch'
 git init "$CR_ROOT/depot_tools"
 git -C "$CR_ROOT/depot_tools" remote add origin https://chromium.googlesource.com/chromium/tools/depot_tools.git
 retry git -C "$CR_ROOT/depot_tools" -c fetch.fsckObjects=true fetch --no-tags --depth=1 origin "$depot_revision"
 git -C "$CR_ROOT/depot_tools" checkout --detach "$depot_revision"
-[[ "$(git -C "$CR_ROOT/depot_tools" rev-parse HEAD)" == "$depot_revision" ]] || fail 'depot_tools revision mismatch'
+[[ "$(git -C "$CR_ROOT/depot_tools" rev-parse --verify HEAD)" == "$depot_revision" ]] || fail 'depot_tools revision mismatch'
 cat > "$CR_ROOT/.gclient" <<'GCLIENT'
 solutions = [{
   'name': 'src',
