@@ -113,19 +113,21 @@ def _is_adopted(pid, fields, protected_children):
             and pid not in protected_children)
 
 
+def _is_live_proc(proc_dir, fields):
+    if fields[0] not in DEAD_PROC_STATES:
+        return True
+    return (fields[0] == 'Z' and len(fields) > 17 and fields[17].isdigit()
+            and int(fields[17]) > 1 and _has_live_thread(proc_dir))
+
+
 def _belongs_to_build(pid, fields, sid, protected_children):
-    return fields[3] == str(sid) or _is_adopted(pid, fields, protected_children)
+    return pid != os.getpid() and (fields[3] == str(sid) or _is_adopted(pid, fields, protected_children))
 
 
 def _live_session_pids(sid, proc_root='/proc', protected_children=None):
     pids = []
     for pid, proc_dir, fields in _proc_entries(proc_root):
-        if not _belongs_to_build(pid, fields, sid, protected_children):
-            continue
-        if fields[0] not in DEAD_PROC_STATES:
-            pids.append(pid)
-        elif (fields[0] == 'Z' and len(fields) > 17 and fields[17].isdigit()
-              and int(fields[17]) > 1 and _has_live_thread(proc_dir)):
+        if _belongs_to_build(pid, fields, sid, protected_children) and _is_live_proc(proc_dir, fields):
             pids.append(pid)
     return pids
 
@@ -146,12 +148,15 @@ def kill_session(sid, timeout=CLEANUP_TIMEOUT_SECONDS, protected_children=None):
             continue
         saw_empty = False
         for pid in pids:
+            proc_dir = Path('/proc', str(pid))
             try:
                 fd = os.pidfd_open(pid)
                 try:
-                    # Recheck ownership after opening the handle, before signalling.
-                    fields = _proc_fields(Path('/proc', str(pid)))
-                    if _belongs_to_build(pid, fields, sid, protected_children):
+                    # Recheck ownership and liveness after opening: pidfd_send_signal
+                    # succeeds on an already-dead zombie, which must not count as forced.
+                    fields = _proc_fields(proc_dir)
+                    if (_belongs_to_build(pid, fields, sid, protected_children)
+                            and _is_live_proc(proc_dir, fields)):
                         signal.pidfd_send_signal(fd, signal.SIGKILL)
                         killed.add(pid)
                 finally:
