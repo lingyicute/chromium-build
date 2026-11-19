@@ -11,13 +11,24 @@ import tempfile
 import zipfile
 
 
+def _open_regular_ro(path):
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    try:
+        return os.fdopen(fd, 'rb')
+    except BaseException:
+        os.close(fd)
+        raise
+
+
 def stage_apk(root, source, destination):
+    if root.is_symlink() or not root.is_dir():
+        raise ValueError('Build root must be a real directory')
     # Do not follow a symlink (or block opening a FIFO) in place of the APK.
-    fd = os.open(source, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
-    with os.fdopen(fd, 'rb') as src:
+    with _open_regular_ro(source) as src:
         before = os.fstat(src.fileno())
         if not stat.S_ISREG(before.st_mode) or before.st_size <= 0:
             raise ValueError('Expected a nonempty regular ChromePublic.apk')
+        os.set_blocking(src.fileno(), True)
         opened_path = Path(f'/proc/self/fd/{src.fileno()}').resolve(strict=True)
         if not opened_path.is_relative_to(root.resolve(strict=True)):
             raise ValueError('ChromePublic.apk resolves outside the build tree')
@@ -34,7 +45,8 @@ def stage_apk(root, source, destination):
                     dst.write(block)
                     remaining -= len(block)
             after = os.fstat(src.fileno())
-            if (remaining or after.st_size != before.st_size
+            if (remaining or after.st_size != before.st_size or after.st_nlink < 1
+                    or after.st_dev != before.st_dev or after.st_ino != before.st_ino
                     or after.st_mtime_ns != before.st_mtime_ns or after.st_ctime_ns != before.st_ctime_ns):
                 raise ValueError('ChromePublic.apk changed while staging')
             candidate.chmod(0o400)
