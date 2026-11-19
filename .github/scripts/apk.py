@@ -65,30 +65,53 @@ def inspect_signer(log, pin):
         raise ValueError('APK does not have exactly the pinned Chromium development signer')
 
 
+def _validate_dex(zf, info):
+    with zf.open(info.filename) as dex:
+        header = dex.read(0x78)
+    file_size = int.from_bytes(header[32:36], 'little')
+    header_size = int.from_bytes(header[36:40], 'little')
+    if (not re.fullmatch(rb'dex\n[0-9]{3}\x00', header[:8]) or header_size not in (0x70, 0x78)
+            or len(header) < header_size or not header_size <= file_size <= info.file_size
+            or header[40:44] != b'\x78\x56\x34\x12'):
+        raise ValueError(f'APK root {info.filename} has an invalid or truncated DEX header')
+
+
 def inspect_zip(apk_path):
     with zipfile.ZipFile(apk_path) as zf:
         entries = zf.infolist()
         names = {info.filename: info for info in entries}
         if len(names) != len(entries) or any(info.filename != info.orig_filename for info in entries):
             raise ValueError('APK contains duplicate or ambiguous ZIP entry names')
+        for name in names:
+            if (not name or name.startswith('/') or '\\' in name
+                    or any(part in ('.', '..') for part in name.split('/'))):
+                raise ValueError(f'APK contains unsafe ZIP entry path: {name!r}')
         for name in ('AndroidManifest.xml', 'classes.dex'):
-            if name not in names or names[name].file_size <= 0:
+            if name not in names or names[name].is_dir() or names[name].file_size <= 0:
                 raise ValueError(f'APK missing non-empty root {name}')
-        with zf.open('classes.dex') as dex:
-            header = dex.read(0x78)
-        file_size = int.from_bytes(header[32:36], 'little')
-        header_size = int.from_bytes(header[36:40], 'little')
-        if (not re.fullmatch(rb'dex\n[0-9]{3}\x00', header[:8]) or header_size not in (0x70, 0x78)
-                or len(header) < header_size or not header_size <= file_size <= names['classes.dex'].file_size
-                or header[40:44] != b'\x78\x56\x34\x12'):
-            raise ValueError('APK root classes.dex has an invalid or truncated DEX header')
+        dex_names = sorted(name for name in names if re.fullmatch(r'classes(?:[2-9]|[1-9][0-9]+)?\.dex', name))
+        for dex_name in dex_names:
+            if names[dex_name].is_dir() or names[dex_name].file_size <= 0:
+                raise ValueError(f'APK root {dex_name} has an invalid or truncated DEX header')
+            _validate_dex(zf, names[dex_name])
 
-        libs = sorted(name for name in names if re.fullmatch(r'lib/[^/]+/[^/]+\.so', name))
+        libs = []
+        for name in sorted(names):
+            if not name.startswith('lib/'):
+                continue
+            info = names[name]
+            if info.is_dir():
+                if name not in ('lib/', 'lib/arm64-v8a/'):
+                    raise ValueError(f'APK contains a native library directory outside arm64-v8a: {name!r}')
+                continue
+            if not name.startswith('lib/arm64-v8a/'):
+                raise ValueError(f'APK contains a native library outside arm64-v8a: {name!r}')
+            if not re.fullmatch(r'lib/arm64-v8a/[^/]+\.so', name):
+                raise ValueError(f'APK missing valid arm64-v8a native library layout: {name!r}')
+            libs.append(name)
         if not libs:
             raise ValueError('APK missing non-empty arm64-v8a native library')
         for name in libs:
-            if not name.startswith('lib/arm64-v8a/'):
-                raise ValueError(f'APK contains a native library outside arm64-v8a: {name!r}')
             with zf.open(name) as lib:
                 header = lib.read(64)
             # Require a complete ELF64 little-endian ET_DYN header for EM_AARCH64.
