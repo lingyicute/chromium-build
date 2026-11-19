@@ -67,7 +67,7 @@ jobs:
               raise SystemExit('ARTIFACT_ID exceeds the safe integer range')
           # Earliest user step: include checkout and setup in the same stage budget.
           start = int(time.clock_gettime(time.CLOCK_BOOTTIME))
-          (Path(os.environ['RUNNER_TEMP']) / 'chromium-job-start').write_text(f'{start}\n')
+          (Path(os.environ['RUNNER_TEMP']) / 'chromium-job-start').write_text(f'{start}\n', encoding='utf-8')
           PY
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         timeout-minutes: 5
