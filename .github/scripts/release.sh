@@ -10,16 +10,25 @@ apk="$inspection/ChromePublic.apk"
 # Verify with SDK/JDK distributed through Chromium DEPS, not runner Android SDK.
 build_tools_root="$CR_ROOT/src/third_party/android_sdk/public/build-tools"
 [[ -d "$build_tools_root" ]] || fail 'Chromium-managed Android build-tools directory missing'
-apksigner=$(find "$build_tools_root" -mindepth 2 -maxdepth 2 ! -path '*/.*/*' -name apksigner -xtype f -executable | sort -V | tail -1)
+"$CR_PYTHON" "$GITHUB_WORKSPACE/.github/scripts/source_state.py" read-lock >/dev/null
+apksigner_list=$(mktemp "$TMPDIR/chromium-apksigner.XXXXXX")
+apk_meta=$(mktemp "$TMPDIR/chromium-apk-meta.XXXXXX.json")
+trap 'rm -f -- "$apksigner_list" "$apk_meta"' EXIT
+find "$build_tools_root" -mindepth 2 -maxdepth 2 ! -path "$build_tools_root/.*/*" \
+  -name apksigner -xtype f -executable -print0 | sort -zV | tail -z -n 1 > "$apksigner_list"
+apksigner=''
+IFS= read -r -d '' apksigner < "$apksigner_list" || true
 [[ -n "$apksigner" ]] || fail 'Chromium-managed Android build-tools apksigner missing'
-build_tools_dir=$(dirname "$apksigner")
+build_tools_dir=$(dirname -- "$apksigner")
 export JAVA_HOME="$CR_ROOT/src/third_party/jdk/current"
 # Prepend Chromium JDK to clean system PATH because apksigner wrappers invoke `java` via PATH.
 export PATH="$JAVA_HOME/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+real_root=$(/usr/bin/realpath -e -- "$CR_ROOT") || fail 'Chromium build root missing'
+[[ "$real_root" != / ]] || fail 'Invalid Chromium build root'
 require_build_tool() {
   local resolved
   resolved=$(/usr/bin/realpath -e -- "$1") || fail "Chromium-managed Android tool missing: $1"
-  [[ "$resolved" == "$CR_ROOT/"* && -f "$resolved" && -x "$resolved" ]] \
+  [[ "$resolved" == "$real_root/"* && -f "$resolved" && -x "$resolved" ]] \
     || fail "Expected an executable tool inside the Chromium tree: $1"
 }
 require_build_tool "$apksigner"
@@ -33,8 +42,7 @@ else
   aapt2="$build_tools_dir/aapt2"
 fi
 require_build_tool "$aapt2"
-apk_meta=$(mktemp "$TMPDIR/chromium-apk-meta.XXXXXX.json")
-trap 'rm -f -- "$apk_meta"' EXIT
+# apk_meta is created above and removed by the EXIT trap.
 "$CR_PYTHON" "$GITHUB_WORKSPACE/.github/scripts/apk.py" inspect \
   "$apk" "$CR_ROOT/metadata/build-lock.json" "$aapt2" "$release/apk-signature.txt" \
   "$GITHUB_WORKSPACE/config/debug_signer_sha256.txt" "$apk_meta"
@@ -50,6 +58,7 @@ cp -a "$CR_ROOT/metadata" "$release/metadata"
 # SHA256SUMS authenticates nothing on its own; it detects corruption only.
 (cd "$release" && find . -type f ! -path './SHA256SUMS' -printf '%P\0' | sort -z | xargs -0r sha256sum -- > SHA256SUMS)
 [[ -s "$release/SHA256SUMS" ]] || fail 'Failed to generate SHA256SUMS'
+(cd "$release" && sha256sum --strict --quiet -c SHA256SUMS) || fail 'SHA256SUMS self-check failed'
 if [[ -n "${GITHUB_STEP_SUMMARY:-}" ]]; then
 "$CR_PYTHON" - "$release" "$apk_meta" "$GITHUB_STEP_SUMMARY" <<'SUMMARY_PY'
 import json, sys
@@ -57,7 +66,7 @@ from pathlib import Path
 
 
 def clean(value):
-    return str(value).replace('`', '').replace('\r', ' ').replace('\n', ' ')
+    return str(value).replace('`', '').replace('\r', ' ').replace('\n', ' ').strip() or '-'
 
 
 try:
