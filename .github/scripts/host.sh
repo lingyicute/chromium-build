@@ -59,16 +59,23 @@ for workdir in "${workdirs[@]}"; do
   sudo -n chown -h "$(id -u):$(id -g)" -- "$workdir"
 done
 # The image ships its own swap file on /mnt; reclaim that space for the tree.
-swap_devs=$(swapon --show=NAME --noheadings --raw)
-while IFS= read -r dev; do
-  [[ "$dev" == /mnt/* ]] || continue
-  # Do not disable or remove a device, symlink or file on another filesystem.
-  [[ -f "$dev" && ! -L "$dev" ]] || continue
-  real_dev=$(realpath -e -- "$dev")
-  [[ "$real_dev" == /mnt/* && "$(stat -c '%d' -- "$real_dev")" == "$relay_device" ]] || continue
-  sudo -n swapoff -- "$real_dev"
-  sudo -n rm -f -- "$real_dev"
-done <<< "$swap_devs"
+# /proc/swaps uses the same fixed 3-digit octal escapes as /proc/self/mountinfo.
+[[ -r /proc/swaps ]] || runner_fail 'Cannot inspect active runner swaps'
+{
+  IFS= read -r _ || runner_fail 'Malformed /proc/swaps header'
+  while IFS=$' \t' read -r encoded_dev swap_type _; do
+    [[ -n "$encoded_dev" && "$swap_type" == file ]] || continue
+    decode_mount_path dev "$encoded_dev"
+    [[ "$dev" == /mnt/* ]] || continue
+    # Do not disable or remove a device, symlink, bind mount, or foreign file.
+    [[ -f "$dev" && ! -L "$dev" ]] || continue
+    real_dev=$(realpath -e -- "$dev") || continue
+    [[ "$real_dev" == /mnt/* && -f "$real_dev" && "$(stat -c '%d' -- "$real_dev")" == "$relay_device" ]] || continue
+    require_no_mount_targets "$real_dev"
+    sudo -n swapoff -- "$real_dev"
+    sudo -n rm -f -- "$real_dev"
+  done
+} < /proc/swaps
 # Reap every background deletion before failing so none keep running on error.
 cleanup_failed=0
 for pid in "${cleanup[@]}"; do
