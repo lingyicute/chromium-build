@@ -9,12 +9,14 @@ archive_relay_tree() (
   find . -mindepth 1 -type s -delete || fail 'Could not remove stale build sockets'
   # Include hidden entries but never archive "." itself: its parent may not
   # allow removal of the relay root when tar uses --remove-files.
+  unset GLOBIGNORE
   shopt -s dotglob nullglob
+  shopt -s globskipdots 2>/dev/null || true
   entries=(*)
   (( ${#entries[@]} > 0 )) || fail 'Cannot checkpoint an empty build tree'
   # Compression alone does not preserve holes on extraction. A dense restored
   # file could consume blocks the previous runner did not need.
-  tar --format=posix --sparse --pax-option=delete=atime,delete=ctime \
+  tar --format=posix --sparse --no-unquote --pax-option=delete=atime,delete=ctime \
     --remove-files -cf - -- "${entries[@]}"
 )
 
