@@ -52,11 +52,15 @@ trap 'echo "::error::Terminated (signal TERM), aborting" >&2; exit 143' TERM
 fail() { echo "::error::$*" >&2; exit 1; }
 # GNU find's -exec ... \; reports failure as a false predicate, not a failing
 # find exit code. Stop on that predicate explicitly, before traversing the dir.
+# Prefix a non-empty marker so a newline-only name survives command substitution.
 make_dirs_removable() {
-  local failed_dir
-  failed_dir=$(find "$1" -type d ! -perm -u+rwx ! -exec chmod u+rwx -- {} \; -print -quit) \
+  local root=$1 failed_dir
+  [[ -n "$root" ]] || fail 'make_dirs_removable requires a directory path'
+  [[ "$root" == /* || "$root" == . || "$root" == ./* || "$root" == .. || "$root" == ../* ]] \
+    || root="./$root"
+  failed_dir=$(find -P "$root" -type d ! -perm -u+rwx ! -exec chmod u+rwx -- {} \; -printf 'failed:%p' -quit) \
     || fail "Could not traverse removable directories under $1"
-  [[ -z "$failed_dir" ]] || fail "Could not grant owner access to $failed_dir"
+  [[ -z "$failed_dir" ]] || fail "Could not grant owner access to ${failed_dir#failed:}"
 }
 # Re-run an idempotent network step against the SAME official source and
 # revision; never falls back to another mirror, branch, or version.
