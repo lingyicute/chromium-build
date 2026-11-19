@@ -93,15 +93,30 @@ def _retry_delay(attempt, retry_delay, headers=None, now=None):
     return min(retry_delay * (2.0 ** min(attempt - 1, 60)), MAX_RETRY_AFTER_SECONDS)
 
 
+def _header_values(headers, name):
+    if headers is None:
+        return []
+    if hasattr(headers, 'items'):
+        target = name.lower()
+        return [v for k, v in headers.items() if isinstance(k, str) and k.lower() == target]
+    if hasattr(headers, 'get_all'):
+        return list(headers.get_all(name, []))
+    val = _header_value(headers, name)
+    return [] if val is None else [val]
+
+
 def _content_length(headers):
     # http.client only understands a single Transfer-Encoding: chunked and
     # reads the first value of each field. Validate framing before trusting it.
-    if hasattr(headers, 'get_all'):
-        for field in ('Content-Length', 'Transfer-Encoding'):
-            if len(headers.get_all(field, [])) > 1:
-                raise ValueError(f'Multiple ChromiumDash {field} headers')
+    for field in ('Content-Length', 'Transfer-Encoding', 'Content-Encoding'):
+        if len(_header_values(headers, field)) > 1:
+            raise ValueError(f'Multiple ChromiumDash {field} headers')
     raw_len = _header_value(headers, 'Content-Length')
     encoding = _header_value(headers, 'Transfer-Encoding')
+    content_encoding = _header_value(headers, 'Content-Encoding')
+    if content_encoding is not None:
+        if not isinstance(content_encoding, str) or content_encoding.strip().lower() != 'identity':
+            raise ValueError('Unsupported ChromiumDash Content-Encoding')
     if encoding is not None:
         if raw_len is not None:
             raise ValueError('ChromiumDash returned both Content-Length and Transfer-Encoding')
