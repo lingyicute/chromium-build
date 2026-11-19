@@ -83,12 +83,21 @@ def verify_source(root, lock):
         if repo.is_symlink() or not gitdir.is_dir() or gitdir.is_symlink():
             raise ValueError(f'{directory} is missing a real .git directory')
         git = ['/usr/bin/git', '--no-optional-locks', '--no-replace-objects',
-               '-c', 'core.fsmonitor=false', '-c', 'core.filemode=true', '-C', str(repo)]
+               '-c', 'core.fsmonitor=false', '-c', 'core.filemode=true',
+               '-c', 'core.symlinks=true', '-c', 'core.autocrlf=false',
+               '-c', 'core.ignorecase=false', '-C', str(repo)]
         fields = subprocess.check_output(
-            [*git, 'rev-parse', '--show-toplevel', 'HEAD^{commit}'], env=git_env, text=True,
+            [*git, 'rev-parse', '--show-toplevel', '--absolute-git-dir', 'HEAD^{commit}'],
+            env=git_env, text=True,
         ).splitlines()
-        if fields != [str(repo.resolve()), lock[field]]:
+        if fields != [str(repo.resolve()), str(gitdir.resolve()), lock[field]]:
             raise ValueError(f'{directory} worktree or revision mismatch')
+        # Reject assume-unchanged or skip-worktree index bits on non-gitlink files,
+        # which would make git status silently ignore modified tracked files.
+        indexed = subprocess.check_output([*git, 'ls-files', '-v', '-s', '-z'], env=git_env)
+        for entry in indexed.split(b'\x00'):
+            if entry and not entry.startswith(b'H ') and not entry[2:].startswith(b'160000 '):
+                raise ValueError(f'{directory} has hidden index flags on tracked files')
         # HEAD alone does not prove the working files match. Build outputs,
         # gclient dependency trees and other untracked inputs are not Git changes.
         status = subprocess.check_output(
