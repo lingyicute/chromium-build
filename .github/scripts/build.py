@@ -35,6 +35,10 @@ def monotonic_now():
 DEAD_PROC_STATES = frozenset({'Z', 'X', 'x'})
 
 
+def _is_ascii_uint(text):
+    return text.isascii() and text.isdigit()
+
+
 def compute_jobs(cpu_count=None, mem_kib=None):
     if cpu_count is None:
         cpu_count = os.cpu_count() or 1
@@ -45,7 +49,10 @@ def compute_jobs(cpu_count=None, mem_kib=None):
         mem_line = next((line for line in lines if line.startswith('MemTotal:')), None)
         if mem_line is None:
             raise RuntimeError('MemTotal missing from /proc/meminfo')
-        mem_kib = int(mem_line.split()[1])
+        parts = mem_line.split()
+        if len(parts) != 3 or parts[2] != 'kB' or not _is_ascii_uint(parts[1]):
+            raise RuntimeError(f'Unexpected MemTotal entry in /proc/meminfo: {mem_line!r}')
+        mem_kib = int(parts[1])
     elif isinstance(mem_kib, bool) or not isinstance(mem_kib, int) or mem_kib < 0:
         raise ValueError('mem_kib must be a non-negative integer')
     # Public repos typically have more RAM/CPU than private standard runners.
@@ -63,7 +70,7 @@ def _has_live_thread(proc_dir):
     except OSError:
         return False
     for tid in tids:
-        if not tid.isdigit():
+        if not _is_ascii_uint(tid):
             continue
         try:
             tstat = (proc_dir / 'task' / tid / 'stat').read_text(encoding='utf-8', errors='replace')
@@ -86,7 +93,7 @@ def _proc_fields(proc_dir):
 
 def _proc_entries(proc_root='/proc'):
     for entry in os.listdir(proc_root):
-        if not entry.isdigit():
+        if not _is_ascii_uint(entry):
             continue
         proc_dir = Path(proc_root, entry)
         try:
@@ -116,7 +123,7 @@ def _is_adopted(pid, fields, protected_children):
 def _is_live_proc(proc_dir, fields):
     if fields[0] not in DEAD_PROC_STATES:
         return True
-    return (fields[0] == 'Z' and len(fields) > 17 and fields[17].isdigit()
+    return (fields[0] == 'Z' and len(fields) > 17 and _is_ascii_uint(fields[17])
             and int(fields[17]) > 1 and _has_live_thread(proc_dir))
 
 
