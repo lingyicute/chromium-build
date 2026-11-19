@@ -11,9 +11,13 @@ require_relay_directory "$CR_TRANSFER"
 require_no_mount_targets "$CR_ROOT" "$CR_TRANSFER"
 require_relay_directory "$CR_TRANSFER/checkpoint"
 require_empty_directory "$CR_ROOT"
-"$CR_PYTHON" "$GITHUB_WORKSPACE/.github/scripts/checkpoint.py" restore-stream "$CR_TRANSFER/checkpoint" \
+checkpoint_tool="${GITHUB_WORKSPACE:?}/.github/scripts/checkpoint.py"
+source_state_tool="${GITHUB_WORKSPACE:?}/.github/scripts/source_state.py"
+[[ -r "$checkpoint_tool" && -r "$source_state_tool" && -x "$CR_PYTHON" ]] || fail 'Checkpoint restore tools missing'
+command -v zstd >/dev/null || fail 'zstd missing'
+"$CR_PYTHON" "$checkpoint_tool" restore-stream "$CR_TRANSFER/checkpoint" \
   | zstd -d -c | extract_relay_tree "$CR_ROOT"
-"$CR_PYTHON" "$GITHUB_WORKSPACE/.github/scripts/source_state.py" verify-restore
+"$CR_PYTHON" "$source_state_tool" verify-restore
 # No gclient sync, runhooks, or gn gen here: keep all build inputs and mtimes.
-rmdir "$CR_TRANSFER/checkpoint"
+rmdir -- "$CR_TRANSFER/checkpoint"
 df -h /mnt
