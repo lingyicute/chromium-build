@@ -7,6 +7,7 @@ import os
 from pathlib import Path
 import re
 import signal
+import stat
 import subprocess
 import time
 
@@ -264,6 +265,36 @@ def supervise(command, seconds, grace=STOP_GRACE_SECONDS, env=None, cancel_signa
     return result
 
 
+def append_runner_record(root, stage, record):
+    meta_dir = root / 'metadata'
+    if meta_dir.is_symlink():
+        raise RuntimeError('Build metadata directory must not be a symlink')
+    meta_dir.mkdir(parents=True, exist_ok=True)
+    history = meta_dir / 'runners.jsonl'
+    payload = (json.dumps(record, allow_nan=False) + '\n').encode('utf-8')
+    fd = os.open(history, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o644)
+    try:
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode):
+            raise RuntimeError('runners.jsonl must be a regular file')
+        if stage == '00' and st.st_size != 0:
+            raise RuntimeError('Stage 00 found pre-existing runners.jsonl history')
+        if st.st_size > 0:
+            os.lseek(fd, -1, os.SEEK_END)
+            if os.read(fd, 1) != b'\n':
+                raise RuntimeError('Existing runners.jsonl record is missing its trailing newline')
+        os.lseek(fd, 0, os.SEEK_END)
+        view = memoryview(payload)
+        written = 0
+        while written < len(view):
+            n = os.write(fd, view[written:])
+            if n <= 0:
+                raise OSError('Short write to runners.jsonl')
+            written += n
+    finally:
+        os.close(fd)
+
+
 def summarize(line):
     """Append to the Actions job summary; a diagnostic must never fail the build."""
     path = os.environ.get('GITHUB_STEP_SUMMARY')
@@ -384,10 +415,7 @@ def main():
                   final_stage=final_stage, budget_minutes=round(remaining / 60, 1),
                   setup_seconds=setup, elapsed_seconds=elapsed, status=status,
                   swap_out_mib=swap_mib, disk_free_gib=disk_free)
-    meta_dir = root / 'metadata'
-    meta_dir.mkdir(parents=True, exist_ok=True)
-    with (meta_dir / 'runners.jsonl').open('a', encoding='utf-8') as f:
-        f.write(json.dumps(record) + '\n')
+    append_runner_record(root, stage, record)
     check_cancelled(cancel_signal)
     with open(output_path, 'a', encoding='utf-8') as f:
         f.write(f'status={status}\n')
