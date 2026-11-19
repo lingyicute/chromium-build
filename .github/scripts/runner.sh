@@ -16,6 +16,7 @@ require_relay_mount() {
 
 require_relay_directory() {
   local dir=$1 device
+  [[ -n "${relay_device:-}" ]] || runner_fail 'Relay filesystem check has not run'
   [[ -d "$dir" && ! -L "$dir" ]] || runner_fail "Refusing non-directory or symlink: $dir"
   device=$(stat -c '%d' -- "$dir") || runner_fail "Cannot inspect filesystem for $dir"
   [[ "$device" == "$relay_device" ]] || runner_fail "Expected $dir on the /mnt filesystem"
