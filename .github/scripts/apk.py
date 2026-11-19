@@ -11,6 +11,11 @@ import tempfile
 import zipfile
 
 
+MAX_LOCK_BYTES = 1024 * 1024
+VERSION_PATTERN = re.compile(r'(?:0|[1-9][0-9]{0,3})(?:\.(?:0|[1-9][0-9]{0,5})){3}')
+PACKAGE_ATTR = r"[a-zA-Z][a-zA-Z0-9]*='[^']*'"
+
+
 def _open_regular_ro(path):
     fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
     try:
@@ -18,6 +23,36 @@ def _open_regular_ro(path):
     except BaseException:
         os.close(fd)
         raise
+
+
+def _read_lock_version(lock_path):
+    with _open_regular_ro(lock_path) as src:
+        st = os.fstat(src.fileno())
+        if not stat.S_ISREG(st.st_mode):
+            raise ValueError('build-lock.json must be a regular file')
+        os.set_blocking(src.fileno(), True)
+        raw = src.read(MAX_LOCK_BYTES + 1)
+    if len(raw) > MAX_LOCK_BYTES:
+        raise ValueError('Oversized build-lock.json')
+
+    def _reject_constant(token):
+        raise ValueError(f'Invalid JSON constant in build-lock.json: {token}')
+
+    def _unique_object(pairs):
+        obj = {}
+        for key, value in pairs:
+            if key in obj:
+                raise ValueError('Duplicate field in build-lock.json')
+            obj[key] = value
+        return obj
+
+    lock = json.loads(raw.decode('utf-8'), parse_constant=_reject_constant, object_pairs_hook=_unique_object)
+    if not isinstance(lock, dict):
+        raise ValueError('Invalid build-lock.json')
+    version = lock.get('version')
+    if not isinstance(version, str) or not VERSION_PATTERN.fullmatch(version):
+        raise ValueError('Invalid version in build-lock.json')
+    return version
 
 
 def stage_apk(root, source, destination):
@@ -58,10 +93,17 @@ def inspect_signer(log, pin):
     if not re.fullmatch(r'[0-9a-f]{64}', expected):
         raise ValueError('Invalid development certificate SHA-256 pin')
     trace = log.read_text(encoding='utf-8')
-    counts = re.findall(r'^Number of signers: ([0-9]+)[ \t]*$', trace, re.M)
-    hashes = re.findall(r'^Signer #([1-9][0-9]*) certificate SHA-256 digest: ([0-9a-fA-F]{64})[ \t]*$',
+    counts = re.findall(r'^Number of signers: ([0-9]+)[ \t]*\r?$', trace, re.M)
+    digest_lines = re.findall(r'^Signer #\S+ certificate SHA-256 digest:[^\r\n]*$', trace, re.M)
+    hashes = re.findall(r'^Signer #([1-9][0-9]*) certificate SHA-256 digest: ([0-9a-fA-F]{64})[ \t]*\r?$',
                         trace, re.M)
-    if counts != ['1'] or len(hashes) != 1 or hashes[0][0] != '1' or hashes[0][1].lower() != expected:
+    other_signers = re.findall(r'^Signer #(?!1\b)\S+', trace, re.M)
+    source_stamp = re.search(r'^(?:Verified for SourceStamp:[ \t]*true\b|SourceStamp Signer\b)', trace, re.M)
+    modern_schemes = re.findall(r'^Verified using v(?:2|3(?:\.1)?) scheme \([^)\r\n]+\):[ \t]*(true|false)[ \t]*\r?$',
+                                trace, re.M)
+    if (counts != ['1'] or len(digest_lines) != 1 or len(hashes) != 1 or other_signers
+            or source_stamp is not None or (modern_schemes and 'true' not in modern_schemes)
+            or hashes[0][0] != '1' or hashes[0][1].lower() != expected):
         raise ValueError('APK does not have exactly the pinned Chromium development signer')
 
 
@@ -128,7 +170,9 @@ def inspect_badging(aapt2, apk_path, locked_version):
     package_lines = re.findall(r'^package:[ \t]*([^\r\n]+)$', badging, re.M)
     if len(package_lines) != 1:
         raise ValueError('aapt2 output must contain exactly one package line')
-    fields = re.findall(r"(?:^|[ \t]+)([a-zA-Z]+)='([^']*)'", package_lines[0])
+    if not re.fullmatch(rf'[ \t]*{PACKAGE_ATTR}(?:[ \t]+{PACKAGE_ATTR})*[ \t]*', package_lines[0]):
+        raise ValueError('aapt2 package line contains malformed attributes')
+    fields = re.findall(r"(?:^|[ \t]+)([a-zA-Z][a-zA-Z0-9]*)='([^']*)'", package_lines[0])
     attrs = dict(fields)
     if len(attrs) != len(fields):
         raise ValueError('aapt2 package line has duplicate fields')
@@ -147,17 +191,20 @@ def inspect_badging(aapt2, apk_path, locked_version):
     if (len(abi_lines) != 1 or not re.fullmatch(r"[ \t]*'arm64-v8a'[ \t]*", abi_lines[0])
             or re.search(r'^alt-native-code:', badging, re.M)):
         raise ValueError('APK native-code must declare only arm64-v8a')
-    min_sdk = re.search(r"^sdkVersion:'([^']+)'", badging, re.M)
-    target_sdk = re.search(r"^targetSdkVersion:'([^']+)'", badging, re.M)
+    min_sdks = re.findall(r"^sdkVersion:'([^']+)'[ \t]*\r?$", badging, re.M)
+    target_sdks = re.findall(r"^targetSdkVersion:'([^']+)'[ \t]*\r?$", badging, re.M)
+    if len(min_sdks) > 1 or len(target_sdks) > 1:
+        raise ValueError('aapt2 output contains duplicate SDK version lines')
     return dict(package=expected_package, version_code=attrs['versionCode'],
-                min_sdk=min_sdk[1] if min_sdk else None, target_sdk=target_sdk[1] if target_sdk else None)
+                min_sdk=min_sdks[0] if min_sdks else None,
+                target_sdk=target_sdks[0] if target_sdks else None)
 
 
 def inspect_apk(apk_path, lock_path, aapt2, log, pin, metadata):
-    lock = json.loads(lock_path.read_text(encoding='utf-8'))
+    version = _read_lock_version(lock_path)
     inspect_signer(log, pin)
     inspect_zip(apk_path)
-    meta = inspect_badging(aapt2, apk_path, lock['version'])
+    meta = inspect_badging(aapt2, apk_path, version)
     metadata.write_text(json.dumps(meta) + '\n', encoding='utf-8')
 
 
