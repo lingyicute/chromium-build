@@ -94,10 +94,12 @@ retry() {
       eval "${prev_term:-trap - TERM}"
       fail "Failed after 3 attempts: $* (exit $rc)"
     fi
-    echo "::warning::Attempt $attempt failed (exit $rc), retrying: $*" >&2
+    if (( interrupted == 0 )); then
+      echo "::warning::Attempt $attempt failed (exit $rc), retrying: $*" >&2
+    fi
     wait_s=$(( attempt * 10#$delay ))
     rc=0
-    if (( wait_s > 0 )); then
+    if (( wait_s > 0 && interrupted == 0 )); then
       sleep "$wait_s" &
       sleep_pid=$!
       if (( interrupted != 0 )); then
