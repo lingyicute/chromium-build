@@ -108,10 +108,14 @@ def verify_source(root, lock):
 
     version = {}
     raw_version = read_bounded_bytes(root / 'src/chrome/VERSION', root=root).decode('utf-8')
-    for line in raw_version.splitlines():
-        if line.lstrip().startswith('#'):
+    for raw_line in raw_version.split('\n'):
+        line = raw_line.rstrip('\r')
+        stripped = line.lstrip()
+        if not stripped or stripped.startswith('#'):
             continue
-        key, _, value = line.partition('=')
+        key, sep, value = line.partition('=')
+        if not sep:
+            raise ValueError('chrome/VERSION contains a line without "="')
         key = key.strip()
         if key not in VERSION_FIELDS:
             continue
