@@ -5,8 +5,8 @@ export PATH="/usr/bin:/bin:/usr/sbin:/sbin"
 # Run ONLY on a fresh GitHub-hosted VM. Never use this cleanup on a personal host.
 source "$(dirname "$0")/runner.sh"
 require_hosted_runner
-for cmd in sudo git tar zstd sha256sum timeout fallocate mkswap swapon swapoff \
-  free df du find sort xargs tee chmod chown nproc cp rm rmdir mkdir mktemp ls \
+for cmd in sudo git curl cmp tar zstd sha256sum timeout fallocate mkswap swapon swapoff \
+  free df du find sort xargs tee chmod chown nproc cp ln rm rmdir mkdir mktemp ls \
   cat id uname dirname tail sleep stat realpath; do
   command -v "$cmd" >/dev/null || { echo "Missing runner tool: $cmd; refusing apt/pip fallback" >&2; exit 1; }
 done
