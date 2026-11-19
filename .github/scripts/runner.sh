@@ -48,17 +48,51 @@ decode_mount_path() {
   printf -v "$__dm_out" '%s' "${__dm_acc}${__dm_rest}"
 }
 
+normalize_mount_path() {
+  local __nm_out=$1 __nm_path=$2
+  [[ "$__nm_path" == /* ]] || runner_fail "Mount check path must be absolute: $__nm_path"
+  while [[ "$__nm_path" != / && "$__nm_path" == */ ]]; do
+    __nm_path=${__nm_path%/}
+  done
+  printf -v "$__nm_out" '%s' "$__nm_path"
+}
+
+# Resolve symlinked ancestor directories without dereferencing the leaf itself,
+# matching the canonical paths recorded in /proc/self/mountinfo.
+resolve_mount_parent() {
+  local __rm_out=$1 __rm_path='' __rm_suffix='' __rm_parent __rm_resolved
+  normalize_mount_path __rm_path "$2"
+  if [[ "$__rm_path" == / ]]; then
+    printf -v "$__rm_out" '%s' /
+    return
+  fi
+  __rm_parent=${__rm_path%/*}
+  __rm_suffix="/${__rm_path##*/}"
+  while [[ -n "$__rm_parent" && ! -e "$__rm_parent" ]]; do
+    __rm_suffix="/${__rm_parent##*/}${__rm_suffix}"
+    __rm_parent=${__rm_parent%/*}
+  done
+  __rm_resolved=$(realpath -e -- "${__rm_parent:-/}") || runner_fail "Cannot resolve ancestor of $__rm_path"
+  [[ "$__rm_resolved" != / ]] || __rm_resolved=''
+  printf -v "$__rm_out" '%s' "${__rm_resolved}${__rm_suffix}"
+}
+
 # st_dev cannot detect same-filesystem bind mounts. mountinfo paths use octal
 # escapes, so compare decoded path boundaries rather than grepping for a prefix.
 check_mount_targets() {
   (( $# > 0 )) || runner_fail 'Mount check requires at least one path'
-  local id='' parent='' device='' root='' encoded='' extra='' target dir seen=0
+  local id='' parent='' device='' root='' encoded='' extra='' target dir norm seen=0
+  local -a dirs=()
+  for dir in "$@"; do
+    normalize_mount_path norm "$dir"
+    dirs+=("$norm")
+  done
   while IFS=' ' read -r id parent device root encoded extra; do
     [[ -n "$encoded" && " $extra " == *' - '* ]] || runner_fail 'Malformed runner mount table'
     decode_mount_path target "$encoded"
     [[ "$target" == /* ]] || runner_fail 'Malformed runner mount table'
     seen=1
-    for dir in "$@"; do
+    for dir in "${dirs[@]}"; do
       if [[ "$dir" == / || "$target" == "$dir" || "$target" == "$dir/"* ]]; then
         runner_fail "Refusing mount at or below $dir: $target"
       fi
@@ -70,5 +104,14 @@ check_mount_targets() {
 }
 
 require_no_mount_targets() {
-  check_mount_targets "$@" < /proc/self/mountinfo || runner_fail 'Cannot inspect runner mounts'
+  (( $# > 0 )) || runner_fail 'Mount check requires at least one path'
+  local arg norm resolved
+  local -a targets=()
+  for arg in "$@"; do
+    normalize_mount_path norm "$arg"
+    targets+=("$norm")
+    resolve_mount_parent resolved "$norm"
+    [[ "$resolved" == "$norm" ]] || targets+=("$resolved")
+  done
+  check_mount_targets "${targets[@]}" < /proc/self/mountinfo || runner_fail 'Cannot inspect runner mounts'
 }
