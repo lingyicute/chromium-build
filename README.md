@@ -129,7 +129,7 @@ Android stable 的版本不是写死的；每次新 workflow run 从官方 API �
 
 `metadata/build-lock.json` 包含 Chromium 版本与提交、depot_tools 提交、workflow 源码提交与 run ID。`metadata/runners.jsonl` 记录各编译阶段的 runner 镜像版本、并行度、swap 写入量与剩余磁盘空间。
 
-本构建保留非官方 Chromium 的 `android_channel="default"`；这里 stable 指**源码版本**，并非表示本仓库产物是 Chrome 官方稳定版。非官方/非 Chrome 品牌构建默认开启 `dcheck_always_on`、`enable_java_asserts`、`debuggable_apks` 与 `fieldtrial_testing_config`，`config/args.gn` 显式将其全部关闭（并设 `disable_fieldtrial_testing_config = true`），避免 APK 带着会直接崩溃的 C++/Java 断言、`android:debuggable="true"` 或未发布测试实验运行（`release.sh` 亦会拒绝 debuggable APK）。Android 最低版本由所选 stable 源码决定，不硬编码向下兼容承诺。
+本构建保留非官方 Chromium 的 `android_channel="default"`；这里 stable 指**源码版本**，并非表示本仓库产物是 Chrome 官方稳定版。非官方/非 Chrome 品牌构建默认开启 `dcheck_always_on`、`enable_java_asserts` 与 `fieldtrial_testing_config`，`config/args.gn` 显式将其关闭（设 `disable_fieldtrial_testing_config = true`），并显式固定 `debuggable_apks = false`，避免 APK 带着会直接崩溃的 C++/Java 断言、`android:debuggable="true"` 或未发布测试实验运行（`release.sh` 亦会拒绝 debuggable APK）。Android 最低版本由所选 stable 源码决定，不硬编码向下兼容承诺。
 
 **APK 使用公开开发密钥签名，不适合生产分发。** `config/debug_signer_sha256.txt` 锁定上游 `build/android/chromium-debug.keystore` 的证书 SHA-256，若上游更换该证书，应审查后更新。验签与证书匹配不能证明发布者身份，因为开发私钥是公开的。
 

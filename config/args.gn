@@ -11,8 +11,8 @@ dcheck_always_on = false
 # config.gni also enables Java asserts whenever !is_official_build, even with
 # dcheck_always_on = false, passing --force-enable-assertions to D8/R8.
 enable_java_asserts = false
-# config.gni marks non-official APKs android:debuggable="true", exposing app
-# data via adb/run-as and disabling ART release optimizations.
+# Pin android:debuggable="true" off explicitly so app data is never exposed via
+# adb/run-as and ART release optimizations stay on even if config.gni changes.
 debuggable_apks = false
 # Unbranded Android builds otherwise enable testing/variations/fieldtrial_testing_config.json
 # experiments by default instead of shipping Stable's hardcoded feature defaults.
