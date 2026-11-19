@@ -1353,7 +1353,246 @@ class Hardening(unittest.TestCase):
 
         self.assertIn("'generate_location_tags': False", (ROOT / '.github/scripts/fetch.sh').read_text())
         self.assertIn('trap reap_cleanup EXIT', (ROOT / '.github/scripts/host.sh').read_text())
+
         self.assertEqual(len(depot_sha), 40)
+
+    def test_audit_regressions(self):
+        import zipfile
+        from unittest import mock
+
+        scripts = ROOT / '.github/scripts'
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            src = base / 'src'
+            src.mkdir()
+            weird = src / r'file\nname.txt'
+            weird.write_text('literal-backslash')
+            archive = base / 'out.tar'
+            env = dict(os.environ, RUNNER_TEMP=tmp, GLOBIGNORE='*.txt')
+            harness = 'source "$1/common.sh"; source "$1/relay.sh"; '
+            subprocess.run(['bash', '-euc', harness + 'archive_relay_tree "$2" > "$3"',
+                            '_', str(scripts), str(src), str(archive)], env=env, check=True, timeout=10)
+            self.assertEqual(list(src.iterdir()), [])
+            subprocess.run(['bash', '-euc', harness + 'extract_relay_tree "$2" < "$3"',
+                            '_', str(scripts), str(src), str(archive)], env=env, check=True, timeout=10)
+            self.assertEqual(weird.read_text(), 'literal-backslash')
+
+        class _ShortReader:
+            def __init__(self, data):
+                self._data = data
+                self._pos = 0
+
+            def readinto(self, buf):
+                if self._pos >= len(self._data):
+                    return 0
+                n = min(2, len(buf), len(self._data) - self._pos)
+                buf[:n] = self._data[self._pos:self._pos + n]
+                self._pos += n
+                return n
+
+        target = bytearray(5)
+        self.assertTrue(checkpoint._read_exact(_ShortReader(b'hello'), memoryview(target)))
+        self.assertEqual(bytes(target), b'hello')
+        self.assertFalse(checkpoint._read_exact(_ShortReader(b'hi'), memoryview(bytearray(5))))
+
+        child = subprocess.Popen(['true'])
+        try:
+            deadline = time.monotonic() + 2
+            while time.monotonic() < deadline:
+                if build._proc_fields(Path('/proc', str(child.pid)))[0] == 'Z':
+                    break
+                time.sleep(0.01)
+            zombie_pid = child.pid
+            calls = 0
+
+            def fake_live(_sid, proc_root='/proc', protected_children=None):
+                nonlocal calls
+                calls += 1
+                return [zombie_pid] if calls == 1 else []
+
+            with mock.patch.object(build, '_live_session_pids', side_effect=fake_live), \
+                 mock.patch.object(build, '_belongs_to_build', return_value=True):
+                killed, lingering = build.kill_session(zombie_pid, timeout=0.5)
+            self.assertEqual((killed, lingering), ([], []))
+        finally:
+            child.wait()
+
+        with tempfile.TemporaryDirectory() as tmp:
+            proc = Path(tmp)
+            (proc / '\u00b2').mkdir()
+            (proc / '99').mkdir()
+            (proc / '99/stat').write_text('99 (x) Z 1 99 555 ' + ' '.join(['0'] * 13 + ['\u00b2', '0']) + '\n')
+            self.assertEqual(build._live_session_pids(555, proc_root=proc), [])
+            root = proc / 'relay'
+            (root / 'metadata').mkdir(parents=True)
+            build.append_runner_record(root, '00', {'stage': '00', 'status': 'running', 'final_stage': False})
+            with self.assertRaisesRegex(RuntimeError, 'pre-existing'):
+                build.append_runner_record(root, '00', {'stage': '00', 'status': 'running', 'final_stage': False})
+            (root / 'metadata/runners.jsonl').write_text('{"stage":"00"}')
+            with self.assertRaisesRegex(RuntimeError, 'trailing newline'):
+                build.append_runner_record(root, '01', {'stage': '01', 'status': 'running', 'final_stage': False})
+
+        with mock.patch('builtins.print', side_effect=BrokenPipeError('tee closed')):
+            build.log_status('still succeeds')
+
+        for hdrs, pattern in (({'Content-Length': '2', 'content-length': '2'}, 'Multiple.*Content-Length'),
+                              ({'Content-Encoding': 'gzip'}, 'Unsupported.*Content-Encoding')):
+            resp = _FakeResponse(b'[]')
+            resp.headers = hdrs
+            with self.assertRaisesRegex(ValueError, pattern):
+                resolve.fetch_release_json(opener=_FakeOpener([resp]))
+        for bad_url in ('https://chromiumdash.appspot.com:bad/x',
+                        'https://chromiumdash.appspot.com/x#frag',
+                        'https://chromiumdash.appspot.com/x y'):
+            with self.assertRaises(ValueError, msg=bad_url):
+                resolve.fetch_release_json(url=bad_url, opener=_FakeOpener([]))
+
+        source_state = ROOT / '.github/scripts/source_state.py'
+        with tempfile.TemporaryDirectory() as tmp:
+            cr = Path(tmp) / 'root'
+            ws = Path(tmp) / 'ws'
+            for d in ('metadata', 'src/chrome', 'src/out/Release', 'src/buildtools/linux64',
+                      'src/third_party/ninja', 'depot_tools'):
+                (cr / d).mkdir(parents=True)
+            (ws / 'config').mkdir(parents=True)
+            for repo in (cr / 'src', cr / 'depot_tools'):
+                subprocess.run(['git', 'init', '-q', str(repo)], check=True)
+                (repo / 'tracked.txt').write_text('locked\n')
+                subprocess.run(['git', '-C', str(repo), 'add', 'tracked.txt'], check=True)
+                if repo.name == 'src':
+                    subprocess.run(['git', '-C', str(repo), 'update-index', '--add', '--cacheinfo',
+                                    '160000,' + '1' * 40 + ',third_party/skipped_sub'], check=True)
+                subprocess.run(['git', '-C', str(repo), '-c', 'user.name=t', '-c', 'user.email=t@t',
+                                'commit', '-q', '-m', 'init'], check=True)
+            subprocess.run(['git', '-C', str(cr / 'src'), 'update-index', '--skip-worktree',
+                            'third_party/skipped_sub'], check=True)
+            src_sha = subprocess.check_output(['git', '-C', str(cr / 'src'), 'rev-parse', 'HEAD'], text=True).strip()
+            dep_sha = subprocess.check_output(['git', '-C', str(cr / 'depot_tools'), 'rev-parse', 'HEAD'], text=True).strip()
+            (ws / 'config/depot_tools_revision.txt').write_text(dep_sha + '\n')
+            (ws / 'config/args.gn').write_bytes(b'is_debug = false\n')
+            (cr / 'src/out/Release/args.gn').write_bytes(b'is_debug = false\n')
+            (cr / 'metadata/args.gn').write_bytes(b'is_debug = false\n')
+            (cr / 'src/out/Release/build.ninja').write_text('')
+            for rel in ('src/buildtools/linux64/gn', 'src/third_party/ninja/ninja'):
+                (cr / rel).write_text('#!/bin/sh\n')
+                (cr / rel).chmod(0o755)
+            (cr / 'src/chrome/VERSION').write_text('MAJOR=159\nMINOR=0\nBUILD=8154\nPATCH=18\n')
+            lock = {'repository': 'o/r', 'run_id': '1', 'workflow_sha': 'c' * 40,
+                    'target': 'chrome_public_apk', 'architecture': 'arm64',
+                    'source': resolve.SOURCE, 'release_api': resolve.URL,
+                    'chromium_revision': src_sha, 'depot_tools_revision': dep_sha,
+                    'version': '159.0.8154.18'}
+            (cr / 'metadata/build-lock.json').write_text(json.dumps(lock))
+            (cr / 'metadata/chromiumdash.json').write_text(json.dumps([
+                {'channel': 'Stable', 'platform': 'Android', 'version': '159.0.8154.18',
+                 'hashes': {'chromium': src_sha}}]))
+            (cr / 'metadata/runners.jsonl').write_text(json.dumps(
+                {'stage': '00', 'status': 'running', 'final_stage': False}) + '\n')
+            env = dict(os.environ, CR_ROOT=str(cr), GITHUB_WORKSPACE=str(ws),
+                       GITHUB_REPOSITORY='o/r', GITHUB_RUN_ID='1', GITHUB_SHA='c' * 40, STAGE='01')
+            self.assertEqual(subprocess.run([sys.executable, str(source_state), 'verify-restore'],
+                                            env=env, capture_output=True, text=True).returncode, 0)
+            (cr / 'src/tracked.txt').write_text('tampered\n')
+            for flag in ('--assume-unchanged', '--skip-worktree'):
+                subprocess.run(['git', '-C', str(cr / 'src'), 'update-index', flag, 'tracked.txt'], check=True)
+                res = subprocess.run([sys.executable, str(source_state), 'verify-restore'],
+                                     env=env, capture_output=True, text=True)
+                self.assertNotEqual(res.returncode, 0)
+                self.assertIn('hidden index flags', res.stderr)
+                subprocess.run(['git', '-C', str(cr / 'src'), 'update-index', '--no-' + flag[2:], 'tracked.txt'], check=True)
+            (cr / 'src/tracked.txt').write_text('locked\n')
+            (cr / 'src/chrome/VERSION').write_text('MAJOR=159\nMINOR=0\nBUILD=8154\nPATCH=18\nbroken_line\n')
+            res = subprocess.run([sys.executable, str(source_state), 'verify-restore'],
+                                 env=env, capture_output=True, text=True)
+            self.assertNotEqual(res.returncode, 0)
+            (cr / 'src/chrome/VERSION').write_text('MAJOR=159\nMINOR=0\nBUILD=8154\nPATCH=18\n')
+            (cr / 'metadata/args.gn').unlink()
+            (cr / 'metadata/args.gn').symlink_to(ws / 'config/args.gn')
+            res = subprocess.run([sys.executable, str(source_state), 'verify-restore'],
+                                 env=env, capture_output=True, text=True)
+            self.assertNotEqual(res.returncode, 0)
+            self.assertIn('metadata/args.gn', res.stderr)
+
+        apk_script = ROOT / '.github/scripts/apk.py'
+        pin = ROOT / 'config/debug_signer_sha256.txt'
+        fp = pin.read_text().strip()
+        elf = (b'\x7fELF\x02\x01\x01' + bytes(9) + b'\x03\x00\xb7\x00\x01\x00\x00\x00'
+               + bytes(28) + b'\x40\x00' + bytes(10))
+        dex = b'dex\n039\x00' + bytes(24) + b'\x70\x00\x00\x00' * 2 + b'\x78\x56\x34\x12' + bytes(68)
+        good_badging = ("package: name='org.chromium.chrome' versionCode='1234' versionName='159.0.8154.18'\n"
+                        "sdkVersion:'29'\ntargetSdkVersion:'36'\nnative-code: 'arm64-v8a'")
+        good_sig = ('Verified using v2 scheme (APK Signature Scheme v2): true\n'
+                    f'Number of signers: 1\nSigner #1 certificate SHA-256 digest: {fp}\n')
+        with tempfile.TemporaryDirectory() as tmp:
+            t = Path(tmp)
+            apk_file = t / 'a.apk'
+            lock_file = t / 'build-lock.json'
+            lock_file.write_text(json.dumps({'version': '159.0.8154.18'}))
+            sig_file = t / 'sig.txt'
+            meta_file = t / 'meta.json'
+            tool = t / 'aapt2'
+            tool.write_text('#!/bin/sh\nprintf "%s\\n" "$FAKE_BADGING"\n')
+            tool.chmod(0o755)
+            for extra_entry in ('lib/x86_64/wrap.sh', 'lib/armeabi-v7a/', 'lib/arm64-v8a/wrap.sh',
+                                'classes2.dex', '../escape'):
+                with zipfile.ZipFile(apk_file, 'w') as zf:
+                    zf.writestr('AndroidManifest.xml', b'm')
+                    zf.writestr('classes.dex', dex)
+                    zf.writestr('lib/arm64-v8a/libchrome.so', elf)
+                    zf.writestr(extra_entry, b'' if extra_entry.endswith('/') else b'bad')
+                sig_file.write_text(good_sig)
+                res = subprocess.run([sys.executable, str(apk_script), 'inspect', str(apk_file), str(lock_file),
+                                      str(tool), str(sig_file), str(pin), str(meta_file)],
+                                     env=dict(os.environ, FAKE_BADGING=good_badging), capture_output=True, text=True)
+                self.assertNotEqual(res.returncode, 0, extra_entry)
+            with zipfile.ZipFile(apk_file, 'w') as zf:
+                zf.writestr('AndroidManifest.xml', b'm')
+                zf.writestr('classes.dex', dex)
+                zf.writestr('classes2.dex', dex)
+                zf.writestr('lib/arm64-v8a/libchrome.so', elf)
+            sig_file.write_text(good_sig)
+            self.assertEqual(subprocess.run([sys.executable, str(apk_script), 'inspect', str(apk_file), str(lock_file),
+                                             str(tool), str(sig_file), str(pin), str(meta_file)],
+                                            env=dict(os.environ, FAKE_BADGING=good_badging),
+                                            capture_output=True, text=True).returncode, 0)
+            for bad_sig in (good_sig.replace(': true', ': false'),
+                            good_sig + 'Verified for SourceStamp: true\n',
+                            good_sig + 'Signer #2 certificate DN: CN=Other\n'):
+                sig_file.write_text(bad_sig)
+                self.assertNotEqual(subprocess.run(
+                    [sys.executable, str(apk_script), 'inspect', str(apk_file), str(lock_file),
+                     str(tool), str(sig_file), str(pin), str(meta_file)],
+                    env=dict(os.environ, FAKE_BADGING=good_badging), capture_output=True, text=True).returncode, 0)
+            sig_file.write_text(good_sig)
+            self.assertNotEqual(subprocess.run(
+                [sys.executable, str(apk_script), 'inspect', str(apk_file), str(lock_file),
+                 str(tool), str(sig_file), str(pin), str(meta_file)],
+                env=dict(os.environ, FAKE_BADGING=good_badging.replace("versionCode='1234'", "bogus versionCode='1234'")),
+                capture_output=True, text=True).returncode, 0)
+            lock_file.write_text('["not-a-dict"]')
+            res = subprocess.run([sys.executable, str(apk_script), 'inspect', str(apk_file), str(lock_file),
+                                  str(tool), str(sig_file), str(pin), str(meta_file)],
+                                 env=dict(os.environ, FAKE_BADGING=good_badging), capture_output=True, text=True)
+            self.assertNotEqual(res.returncode, 0)
+            self.assertIn('Invalid build-lock.json', res.stderr)
+
+        rv = ResultVerdict()
+        ok, summary = rv.verdict(prepare=('skipped', ''), part_01=('failure', ''))
+        self.assertFalse(ok)
+        self.assertNotIn('default branch', summary)
+        ok, summary = rv.verdict(prepare=('success', 'running'), part_01=('cancelled', 'completed'))
+        self.assertFalse(ok)
+        self.assertNotIn('unverified-apk-*', summary)
+        self.assertIn('cancelled after building', summary)
+        ok, _ = rv.verdict({'prepare': {'apk-id': '999'}}, prepare=('success', 'running'), part_01=('success', 'completed'))
+        self.assertFalse(ok)
+        ok, _ = rv.verdict({'part_01': {'artifact-id': '999'}}, prepare=('success', 'running'), part_01=('success', 'completed'))
+        self.assertFalse(ok)
+        ok, _ = rv.verdict({'part_02': {'apk-id': '999'}}, prepare=('success', 'running'), part_01=('success', 'completed'), part_02=('skipped', ''))
+        self.assertFalse(ok)
+        ok, summary = rv.verdict(prepare=('failure', '```'))
+        self.assertFalse(ok)
+        self.assertNotIn('| `` |', summary)
 
     def test_result_verdict_empty_status_and_anomalies(self):
         rv = ResultVerdict()
