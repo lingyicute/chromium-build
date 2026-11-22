@@ -58,6 +58,7 @@ make_dirs_removable() {
   [[ -n "$root" ]] || fail 'make_dirs_removable requires a directory path'
   [[ "$root" == /* || "$root" == . || "$root" == ./* || "$root" == .. || "$root" == ../* ]] \
     || root="./$root"
+  [[ -d "$root" && ! -L "$root" ]] || fail "make_dirs_removable requires a real directory: $1"
   failed_dir=$(find -P "$root" -type d ! -perm -u+rwx ! -exec chmod u+rwx -- {} \; -printf 'failed:%p' -quit) \
     || fail "Could not traverse removable directories under $1"
   [[ -z "$failed_dir" ]] || fail "Could not grant owner access to ${failed_dir#failed:}"
