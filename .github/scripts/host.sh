@@ -33,9 +33,10 @@ done
 if [[ -e /chromium-relay.swap || -L /chromium-relay.swap ]]; then
   runner_fail 'Expected no pre-existing /chromium-relay.swap'
 fi
-# Disk layout: / (OS disk) receives the swap file; /mnt (the larger ephemeral
-# disk) is kept entirely for the Chromium tree and checkpoints. Freeing / is
-# what makes room for the swap below.
+# Disk layout: / (OS disk) receives the swap file. A separate /mnt disk is kept
+# entirely for the Chromium tree and checkpoints; on a single-disk runner they
+# share / with the swap and the free-space check below decides. Either way,
+# freeing / is what makes room for the swap.
 # Fixed paths only; no downloaded cleanup script, docker image, or action.
 # Preserve /opt/hostedtoolcache and runner externals (Node required by actions).
 # Unlinking is metadata-bound: delete the trees concurrently, and prepare /mnt
@@ -115,4 +116,5 @@ if free < 100:
     print('::warning::Below Chromium documented 100 GB free disk requirement; best-effort build only.')
 PY
 swappiness=$(cat /proc/sys/vm/swappiness 2>/dev/null || echo unknown)
-{ df -hT / /mnt; free -h; swapon --show; printf 'CPUs=%s\nSwappiness=%s\nImageOS=%s\nImageVersion=%s\n' "$(nproc)" "$swappiness" "${ImageOS:-unknown}" "${ImageVersion:-unknown}"; } | tee "$RUNNER_TEMP/chromium-logs/host.txt"
+if (( relay_shares_root )); then relay_layout=shared-with-os-disk; else relay_layout=separate-disk; fi
+{ df -hT / /mnt; free -h; swapon --show; printf 'CPUs=%s\nSwappiness=%s\nRelayDisk=%s\nImageOS=%s\nImageVersion=%s\n' "$(nproc)" "$swappiness" "$relay_layout" "${ImageOS:-unknown}" "${ImageVersion:-unknown}"; } | tee "$RUNNER_TEMP/chromium-logs/host.txt"
