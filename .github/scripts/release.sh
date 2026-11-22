@@ -16,10 +16,16 @@ apk_meta=$(mktemp "$TMPDIR/chromium-apk-meta.XXXXXX.json")
 trap 'rm -f -- "$apksigner_list" "$apk_meta"' EXIT
 [[ "$build_tools_root" == /* || "$build_tools_root" == ./* || "$build_tools_root" == ../* ]] \
   || build_tools_root="./$build_tools_root"
-find -H "$build_tools_root" -mindepth 1 -maxdepth 1 -name '.*' -prune -o \
-  -mindepth 2 -maxdepth 2 -name apksigner -xtype f -executable -print0 | sort -zV | tail -z -n 1 > "$apksigner_list"
+# find's -mindepth/-maxdepth are global, so a depth-1 -prune cannot be combined
+# with a depth-2 match. Skip hidden version directories below instead: sort -V
+# orders a leading "." after every digit and would otherwise prefer them.
+find -H "$build_tools_root" -mindepth 2 -maxdepth 2 -name apksigner -xtype f -executable -print0 \
+  | sort -zV > "$apksigner_list"
 apksigner=''
-IFS= read -r -d '' apksigner < "$apksigner_list" || true
+while IFS= read -r -d '' candidate; do
+  version_dir=${candidate%/apksigner}
+  [[ "${version_dir##*/}" == .* ]] || apksigner=$candidate
+done < "$apksigner_list"
 [[ -n "$apksigner" ]] || fail 'Chromium-managed Android build-tools apksigner missing'
 build_tools_dir=$(dirname -- "$apksigner")
 export JAVA_HOME="$CR_ROOT/src/third_party/jdk/current"
