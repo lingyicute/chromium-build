@@ -75,7 +75,7 @@ def _header_value(headers, name):
 def _retry_delay(attempt, retry_delay, headers=None, now=None):
     if retry_delay <= 0:
         return 0.0
-    raw_after = _header_value(headers, 'Retry-After')
+    raw_after = _header_value(headers, 'Retry-After') if len(_header_values(headers, 'Retry-After')) == 1 else None
     if isinstance(raw_after, str):
         text = raw_after.strip()
         if re.fullmatch(r'[0-9]+', text):
@@ -123,7 +123,7 @@ def _content_length(headers):
     if encoding is not None:
         if raw_len is not None:
             raise ValueError('ChromiumDash returned both Content-Length and Transfer-Encoding')
-        if not isinstance(encoding, str) or encoding.lower() != 'chunked':
+        if not isinstance(encoding, str) or encoding.strip().lower() != 'chunked':
             raise ValueError('Unsupported ChromiumDash Transfer-Encoding')
     if raw_len is None:
         return None
