@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Internal archive mechanics. Callers must first validate the runner and disk.
 archive_relay_tree() (
-  cd -- "$1" || exit
+  [[ -n "${1:-}" && -d "$1" && ! -L "$1" ]] || fail 'archive_relay_tree requires a real directory'
+  CDPATH='' cd -P -- "$1" || fail "Cannot enter relay directory: $1"
   # Give the owner access to restricted directories before traversing them.
   # chmod does not alter mtimes or regular file permissions.
   make_dirs_removable .
