@@ -1,5 +1,12 @@
 #!/usr/bin/env bash
 source "$(dirname "$0")/common.sh"
+source "$(dirname "$0")/runner.sh"
+require_hosted_runner
+require_relay_mount
+require_relay_directory "$CR_ROOT"
+require_relay_directory "$CR_TRANSFER"
+require_no_mount_targets "$CR_ROOT" "$CR_TRANSFER"
+require_empty_directory "$CR_ROOT"
 mkdir -p "$HOME" "$CR_ROOT/cache" "$CR_ROOT/metadata" "$CIPD_CACHE_DIR"
 "$CR_PYTHON" "$GITHUB_WORKSPACE/.github/scripts/resolve.py"
 source_state="$GITHUB_WORKSPACE/.github/scripts/source_state.py"
