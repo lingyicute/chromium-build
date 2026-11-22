@@ -179,6 +179,10 @@ def _open_exclusive_wo(path):
         return os.fdopen(fd, 'wb')
     except BaseException:
         os.close(fd)
+        try:
+            os.unlink(path)
+        except OSError:
+            pass
         raise
 
 
