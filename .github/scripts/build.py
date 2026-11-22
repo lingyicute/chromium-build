@@ -228,11 +228,17 @@ def supervise(command, seconds, grace=STOP_GRACE_SECONDS, env=None, cancel_signa
             if rc is not None:
                 result = 'completed' if rc == 0 else f'failed:{rc}'
             else:
-                signalled = True
+                proc_dir = Path('/proc', str(p.pid))
                 try:
-                    os.killpg(p.pid, signal.SIGINT)
-                except ProcessLookupError:
-                    signalled = False
+                    already_dead = not _is_live_proc(proc_dir, _proc_fields(proc_dir))
+                except (OSError, ValueError):
+                    already_dead = False
+                signalled = not already_dead
+                if signalled:
+                    try:
+                        os.killpg(p.pid, signal.SIGINT)
+                    except ProcessLookupError:
+                        signalled = False
                 try:
                     rc = wait_for_ninja(p, grace if signalled else min(grace, 1), cancel_signal)
                 except subprocess.TimeoutExpired:
