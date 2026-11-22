@@ -131,8 +131,11 @@ def inspect_zip(apk_path):
         for name in ('AndroidManifest.xml', 'classes.dex'):
             if name not in names or names[name].is_dir() or names[name].file_size <= 0:
                 raise ValueError(f'APK missing non-empty root {name}')
-        dex_names = sorted(name for name in names if re.fullmatch(r'classes(?:[2-9]|[1-9][0-9]+)?\.dex', name))
-        for dex_name in dex_names:
+        root_dex = [name for name in names if '/' not in name.rstrip('/') and name.rstrip('/').endswith('.dex')]
+        expected_dex = ['classes.dex', *(f'classes{i}.dex' for i in range(2, len(root_dex) + 1))]
+        if len(root_dex) != len(expected_dex) or set(root_dex) != set(expected_dex):
+            raise ValueError('APK root DEX files must form a contiguous classes*.dex sequence')
+        for dex_name in expected_dex:
             if names[dex_name].is_dir() or names[dex_name].file_size <= 0:
                 raise ValueError(f'APK root {dex_name} has an invalid or truncated DEX header')
             _validate_dex(zf, names[dex_name])
