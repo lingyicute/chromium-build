@@ -281,11 +281,12 @@ def append_runner_record(root, stage, record):
     meta_dir.mkdir(parents=True, exist_ok=True)
     history = meta_dir / 'runners.jsonl'
     payload = (json.dumps(record, allow_nan=False) + '\n').encode('utf-8')
-    fd = os.open(history, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o644)
+    fd = os.open(history, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_NONBLOCK, 0o644)
     try:
         st = os.fstat(fd)
         if not stat.S_ISREG(st.st_mode):
             raise RuntimeError('runners.jsonl must be a regular file')
+        os.set_blocking(fd, True)
         if stage == '00' and st.st_size != 0:
             raise RuntimeError('Stage 00 found pre-existing runners.jsonl history')
         if st.st_size > 0:
@@ -321,10 +322,9 @@ def swapped_out_bytes(vmstat='/proc/vmstat'):
     try:
         with open(vmstat, encoding='utf-8') as f:
             for line in f:
-                key, _, value = line.partition(' ')
-                if key == 'pswpout':
-                    pages = int(value)
-                    return pages * os.sysconf('SC_PAGE_SIZE') if pages >= 0 else None
+                parts = line.split()
+                if len(parts) == 2 and parts[0] == 'pswpout' and _is_ascii_uint(parts[1]):
+                    return int(parts[1]) * os.sysconf('SC_PAGE_SIZE')
     except (OSError, ValueError):
         pass
     return None
@@ -424,6 +424,7 @@ def main():
                   final_stage=final_stage, budget_minutes=round(remaining / 60, 1),
                   setup_seconds=setup, elapsed_seconds=elapsed, status=status,
                   swap_out_mib=swap_mib, disk_free_gib=disk_free)
+    check_cancelled(cancel_signal)
     append_runner_record(root, stage, record)
     check_cancelled(cancel_signal)
     with open(output_path, 'a', encoding='utf-8') as f:
