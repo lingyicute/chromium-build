@@ -35,6 +35,7 @@ tests/
   test_runner.py
   test_apk.py
   test_checkpoint_integration.py
+  test_release.py
 README.md
 ```
 > [!tip]
