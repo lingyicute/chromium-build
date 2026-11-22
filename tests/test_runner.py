@@ -25,10 +25,19 @@ class RunnerGuards(unittest.TestCase):
                     self.assertNotEqual(result.returncode, 0)
                     self.assertIn('GitHub-hosted runner required', result.stderr)
 
-    def test_relay_mount_rejects_os_disk_before_writes(self):
-        result = self.run_guard('source "$1/runner.sh"; stat() { echo 123; }; require_relay_mount', '.')
+    def test_relay_mount_accepts_separate_and_single_disk_layouts(self):
+        # Hosted runners have either a separate /mnt disk or one OS disk that also holds /mnt.
+        layouts = (('stat() { if [[ "${*: -1}" == / ]]; then echo 1; else echo 2; fi; }', '2 0'),
+                   ('stat() { echo 123; }', '123 1'))
+        for stub, expected in layouts:
+            with self.subTest(expected=expected):
+                result = self.run_guard(f'source "$1/runner.sh"; {stub}; require_relay_mount; '
+                                        'printf "%s %s" "$relay_device" "$relay_shares_root"', '.')
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(result.stdout, expected)
+        result = self.run_guard('source "$1/runner.sh"; stat() { return 1; }; require_relay_mount', '.')
         self.assertNotEqual(result.returncode, 0)
-        self.assertIn('separate /mnt filesystem', result.stderr)
+        self.assertIn('Cannot inspect root filesystem', result.stderr)
 
     def test_mount_targets_reject_nested_and_same_device_bind_mounts(self):
         command = 'source "$1/runner.sh"; check_mount_targets "$2"'

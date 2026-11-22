@@ -6,12 +6,16 @@ require_hosted_runner() {
   [[ "${RUNNER_ENVIRONMENT:-}" == github-hosted ]] || runner_fail 'GitHub-hosted runner required'
 }
 
+# Hosted runners come with either a separate /mnt disk or one larger OS disk that
+# also holds /mnt. Both are accepted: host.sh checks the space that is really free.
 require_relay_mount() {
   local root_device
   [[ -d /mnt && ! -L /mnt ]] || runner_fail '/mnt must be a real directory'
   root_device=$(stat -c '%d' -- /) || runner_fail 'Cannot inspect root filesystem'
   relay_device=$(stat -c '%d' -- /mnt) || runner_fail 'Cannot inspect /mnt filesystem'
-  [[ "$relay_device" != "$root_device" ]] || runner_fail 'A separate /mnt filesystem is required; refusing to use the OS disk for the build tree'
+  [[ -n "$root_device" && -n "$relay_device" ]] || runner_fail 'Cannot inspect /mnt filesystem'
+  relay_shares_root=0
+  [[ "$relay_device" != "$root_device" ]] || relay_shares_root=1
 }
 
 require_relay_directory() {
