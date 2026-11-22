@@ -8,6 +8,7 @@ import math
 import os
 from pathlib import Path
 import re
+import stat
 import sys
 import time
 import urllib.error
@@ -88,6 +89,8 @@ def _retry_delay(attempt, retry_delay, headers=None, now=None):
                 if target.tzinfo is None:
                     target = target.replace(tzinfo=datetime.timezone.utc)
                 ref = now if now is not None else datetime.datetime.now(datetime.timezone.utc)
+                if ref.tzinfo is None:
+                    ref = ref.replace(tzinfo=datetime.timezone.utc)
                 delta = (target - ref).total_seconds()
                 return max(0.0, min(delta, MAX_RETRY_AFTER_SECONDS))
     return min(retry_delay * (2.0 ** min(attempt - 1, 60)), MAX_RETRY_AFTER_SECONDS)
@@ -239,8 +242,29 @@ def fetch_release_json(url=URL, timeout=90, attempts=FETCH_ATTEMPTS,
     raise last_error
 
 
+def _write_regular_bytes(path, data):
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_NOFOLLOW | os.O_NONBLOCK, 0o644)
+    try:
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode):
+            raise ValueError(f'Expected regular file: {path.name}')
+        os.set_blocking(fd, True)
+        os.ftruncate(fd, 0)
+        view = memoryview(data)
+        written = 0
+        while written < len(view):
+            n = os.write(fd, view[written:])
+            if n <= 0:
+                raise OSError(f'Short write to {path.name}')
+            written += n
+    finally:
+        os.close(fd)
+
+
 def main():
     root = Path(os.environ['CR_ROOT'])
+    if root.is_symlink() or not root.is_dir():
+        raise ValueError('Build root must be a real directory')
     repository = os.environ['GITHUB_REPOSITORY']
     workflow_sha = os.environ['GITHUB_SHA']
     run_id = os.environ['GITHUB_RUN_ID']
@@ -249,6 +273,8 @@ def main():
     if not re.fullmatch(r'[0-9a-f]{40}', depot):
         raise ValueError('depot_tools must be a full, reviewed commit SHA')
     meta = root / 'metadata'
+    if meta.is_symlink():
+        raise ValueError('Build metadata directory must not be a symlink')
     meta.mkdir(parents=True, exist_ok=True)
     raw = fetch_release_json()
     version, revision = validate(parse_release_json(raw))
@@ -258,8 +284,8 @@ def main():
                 repository=repository, workflow_sha=workflow_sha,
                 run_id=run_id,
                 resolved_at=datetime.datetime.now(datetime.timezone.utc).isoformat())
-    (meta / 'chromiumdash.json').write_bytes(raw)
-    (meta / 'build-lock.json').write_text(json.dumps(lock, indent=2) + '\n', encoding='utf-8')
+    _write_regular_bytes(meta / 'chromiumdash.json', raw)
+    _write_regular_bytes(meta / 'build-lock.json', (json.dumps(lock, indent=2) + '\n').encode('utf-8'))
     print(json.dumps(lock, indent=2))
 
 
