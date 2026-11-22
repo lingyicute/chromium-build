@@ -62,6 +62,13 @@ normalize_mount_path() {
   printf -v "$__nm_out" '%s' "$__nm_path"
 }
 
+# Command substitution strips trailing newlines; preserve them via a sentinel.
+realpath_exact() {
+  local __rp_out=$1 __rp_raw
+  __rp_raw=$(realpath -e -- "$2" && printf x) || return 1
+  printf -v "$__rp_out" '%s' "${__rp_raw%$'\n'x}"
+}
+
 # Resolve symlinked ancestor directories without dereferencing the leaf itself,
 # matching the canonical paths recorded in /proc/self/mountinfo.
 resolve_mount_parent() {
@@ -77,7 +84,7 @@ resolve_mount_parent() {
     __rm_suffix="/${__rm_parent##*/}${__rm_suffix}"
     __rm_parent=${__rm_parent%/*}
   done
-  __rm_resolved=$(realpath -e -- "${__rm_parent:-/}") || runner_fail "Cannot resolve ancestor of $__rm_path"
+  realpath_exact __rm_resolved "${__rm_parent:-/}" || runner_fail "Cannot resolve ancestor of $__rm_path"
   [[ "$__rm_resolved" != / ]] || __rm_resolved=''
   printf -v "$__rm_out" '%s' "${__rm_resolved}${__rm_suffix}"
 }
