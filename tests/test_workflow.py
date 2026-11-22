@@ -2118,6 +2118,149 @@ class Hardening(unittest.TestCase):
         self.assertFalse(ok)
         self.assertIn('failed or were cancelled: prepare, part-01.', summary)
 
+    def test_audit_round_two_fixes(self):
+        import zipfile
+        from unittest import mock
+
+        scripts = ROOT / '.github/scripts'
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+
+            # 1. runner.sh: resolve_mount_parent rejects regular-file and direct chmod 000 parents.
+            reg_parent = base / 'not_a_dir'
+            reg_parent.write_text('file')
+            p = subprocess.run(
+                ['bash', '-euc', 'source "$1/runner.sh"; resolve_mount_parent out "$2"',
+                 '_', str(scripts), str(reg_parent / 'child')],
+                capture_output=True, text=True)
+            self.assertNotEqual(p.returncode, 0)
+
+            if os.geteuid() != 0:
+                opaque = base / 'direct_opaque'
+                opaque.mkdir()
+                opaque.chmod(0o000)
+                try:
+                    p = subprocess.run(
+                        ['bash', '-euc', 'source "$1/runner.sh"; resolve_mount_parent out "$2"',
+                         '_', str(scripts), str(opaque / 'child')],
+                        capture_output=True, text=True)
+                    self.assertNotEqual(p.returncode, 0)
+                finally:
+                    opaque.chmod(0o755)
+
+            # 2. resolve.py: multiple Retry-After headers fall back to exponential backoff; Transfer-Encoding whitespace.
+            self.assertEqual(resolve._retry_delay(1, 2.0, [('Retry-After', '0'), ('Retry-After', '60')]), 2.0)
+            resp = _FakeResponse(b'[]')
+            resp.headers = {'Transfer-Encoding': ' chunked '}
+            self.assertEqual(resolve.fetch_release_json(opener=_FakeOpener([resp])), b'[]')
+
+            # 3. source_state.py: reject symlinks inside .git, .git/info/attributes, filter.* config, symlinked metadata.
+            cr = base / 'cr'
+            ws = base / 'ws'
+            for d in ('metadata', 'src/chrome', 'depot_tools'):
+                (cr / d).mkdir(parents=True)
+            (ws / 'config').mkdir(parents=True)
+            for repo in (cr / 'src', cr / 'depot_tools'):
+                subprocess.run(['git', 'init', '-q', str(repo)], check=True)
+                (repo / 'f.txt').write_text('v1\n')
+                subprocess.run(['git', '-C', str(repo), 'add', 'f.txt'], check=True)
+                subprocess.run(['git', '-C', str(repo), '-c', 'user.name=t', '-c', 'user.email=t@t',
+                                'commit', '-q', '-m', 'init'], check=True)
+            src_sha = subprocess.check_output(['git', '-C', str(cr / 'src'), 'rev-parse', 'HEAD'], text=True).strip()
+            dep_sha = subprocess.check_output(['git', '-C', str(cr / 'depot_tools'), 'rev-parse', 'HEAD'], text=True).strip()
+            (ws / 'config/depot_tools_revision.txt').write_text(dep_sha + '\n')
+            (cr / 'src/chrome/VERSION').write_text('MAJOR=159\nMINOR=0\nBUILD=8154\nPATCH=18\n')
+            lock = {'repository': 'o/r', 'run_id': '1', 'workflow_sha': 'c' * 40,
+                    'target': 'chrome_public_apk', 'architecture': 'arm64',
+                    'source': resolve.SOURCE, 'release_api': resolve.URL,
+                    'chromium_revision': src_sha, 'depot_tools_revision': dep_sha,
+                    'version': '159.0.8154.18'}
+            (cr / 'metadata/build-lock.json').write_text(json.dumps(lock))
+            (cr / 'metadata/chromiumdash.json').write_text(json.dumps([
+                {'channel': 'Stable', 'platform': 'Android', 'version': '159.0.8154.18',
+                 'hashes': {'chromium': src_sha}}]))
+            ss_env = dict(os.environ, CR_ROOT=str(cr), GITHUB_WORKSPACE=str(ws),
+                          GITHUB_REPOSITORY='o/r', GITHUB_RUN_ID='1', GITHUB_SHA='c' * 40)
+
+            git_sym = cr / 'src/.git/objects/pack_link'
+            git_sym.symlink_to(base)
+            self.assertNotEqual(subprocess.run(
+                [sys.executable, str(scripts / 'source_state.py'), 'verify-source'],
+                env=ss_env, capture_output=True, text=True).returncode, 0)
+            git_sym.unlink()
+
+            subprocess.run(['git', '-C', str(cr / 'src'), 'config', 'filter.evil.clean', 'false'], check=True)
+            res = subprocess.run([sys.executable, str(scripts / 'source_state.py'), 'verify-source'],
+                                 env=ss_env, capture_output=True, text=True)
+            self.assertNotEqual(res.returncode, 0)
+            self.assertIn('unsafe driver configuration', res.stderr)
+            subprocess.run(['git', '-C', str(cr / 'src'), 'config', '--unset', 'filter.evil.clean'], check=True)
+
+            # 4. build.py: reject external ninja symlink and pre-existing stage 00 runners.jsonl before compiling.
+            ext_ninja = base / 'ext_ninja'
+            ext_ninja.write_text('#!/bin/sh\nexit 0\n')
+            ext_ninja.chmod(0o755)
+            b_root = base / 'b_root'
+            (b_root / 'src/third_party/ninja').mkdir(parents=True)
+            (b_root / 'src/third_party/ninja/ninja').symlink_to(ext_ninja)
+            (base / 'chromium-job-start').write_text(str(int(build.monotonic_now())))
+            p = subprocess.run(
+                [sys.executable, str(scripts / 'build.py')],
+                env=dict(os.environ, CR_ROOT=str(b_root), RUNNER_TEMP=str(base), STAGE='00',
+                         GITHUB_RUN_ATTEMPT='1', GITHUB_OUTPUT=str(base / 'b_out'), GITHUB_STEP_SUMMARY=''),
+                capture_output=True, text=True)
+            self.assertNotEqual(p.returncode, 0)
+            self.assertIn('Ninja binary', p.stderr)
+
+            # 5. apk.py: CRLF/empty badging lines, malformed signer lines, symlinked apk/metadata.
+            apk_mod = load('apk')
+            pin = ROOT / 'config/debug_signer_sha256.txt'
+            fp = pin.read_text().strip()
+            elf = (b'\x7fELF\x02\x01\x01' + bytes(9) + b'\x03\x00\xb7\x00\x01\x00\x00\x00'
+                   + bytes(28) + b'\x40\x00' + bytes(10))
+            dex = b'dex\n039\x00' + bytes(24) + b'\x70\x00\x00\x00' * 2 + b'\x78\x56\x34\x12' + bytes(68)
+            apk_path = base / 'valid.apk'
+            with zipfile.ZipFile(apk_path, 'w') as zf:
+                zf.writestr('AndroidManifest.xml', b'm')
+                zf.writestr('classes.dex', dex)
+                zf.writestr('lib/arm64-v8a/libchrome.so', elf)
+            apk_link = base / 'link.apk'
+            apk_link.symlink_to(apk_path)
+            with self.assertRaises(OSError):
+                apk_mod.inspect_zip(apk_link)
+
+            aapt2 = base / 'aapt2'
+            aapt2.write_text('#!/bin/sh\nprintf "%b" "$FAKE_BADGING"\n')
+            aapt2.chmod(0o755)
+            good_b = ("package: name='org.chromium.chrome' versionCode='1234' versionName='159.0.8154.18'\n"
+                      "sdkVersion:'29'\ntargetSdkVersion:'36'\nnative-code: 'arm64-v8a'\n")
+            for bad_b in (good_b.replace("sdkVersion:'29'\n", "sdkVersion: 29\\r\\n"),
+                          good_b + "package:\\n",
+                          good_b + "native-code:\\n"):
+                with mock.patch.dict(os.environ, {'FAKE_BADGING': bad_b}):
+                    with self.assertRaises(ValueError, msg=bad_b):
+                        apk_mod.inspect_badging(aapt2, apk_path, '159.0.8154.18')
+
+            sig = base / 'sig.txt'
+            for bad_sig in (
+                'Verified using v2 scheme (APK Signature Scheme v2): true\n'
+                'Number of signers: 1\nNumber of signers: bogus\n'
+                f'Signer #1 certificate SHA-256 digest: {fp}\n',
+                'Verified using v2 scheme (APK Signature Scheme v2): true\n'
+                'Verified using v3 scheme (APK Signature Scheme v3): maybe\n'
+                f'Number of signers: 1\nSigner #1 certificate SHA-256 digest: {fp}\n',
+            ):
+                sig.write_text(bad_sig)
+                with self.assertRaisesRegex(ValueError, 'pinned Chromium development signer'):
+                    apk_mod.inspect_signer(sig, pin)
+
+        # 6. chromium-stable.yml: post-build failure on prepare does not mask later stage failure.
+        rv = ResultVerdict()
+        ok, summary = rv.verdict(prepare=('failure', 'completed'), part_01=('failure', ''))
+        self.assertFalse(ok)
+        self.assertIn('failed or were cancelled: prepare, part-01.', summary)
+        self.assertNotIn('unverified-apk-*', summary)
+
 
 if __name__ == '__main__':
     unittest.main()
