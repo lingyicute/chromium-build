@@ -25,15 +25,20 @@ def _open_regular_ro(path):
         raise
 
 
-def _read_lock_version(lock_path):
-    with _open_regular_ro(lock_path) as src:
+def _read_bounded_text(path, encoding, label):
+    with _open_regular_ro(path) as src:
         st = os.fstat(src.fileno())
         if not stat.S_ISREG(st.st_mode):
-            raise ValueError('build-lock.json must be a regular file')
+            raise ValueError(f'{label} must be a regular file')
         os.set_blocking(src.fileno(), True)
         raw = src.read(MAX_LOCK_BYTES + 1)
     if len(raw) > MAX_LOCK_BYTES:
-        raise ValueError('Oversized build-lock.json')
+        raise ValueError(f'Oversized {label}')
+    return raw.decode(encoding)
+
+
+def _read_lock_version(lock_path):
+    text = _read_bounded_text(lock_path, 'utf-8', 'build-lock.json')
 
     def _reject_constant(token):
         raise ValueError(f'Invalid JSON constant in build-lock.json: {token}')
@@ -46,7 +51,7 @@ def _read_lock_version(lock_path):
             obj[key] = value
         return obj
 
-    lock = json.loads(raw.decode('utf-8'), parse_constant=_reject_constant, object_pairs_hook=_unique_object)
+    lock = json.loads(text, parse_constant=_reject_constant, object_pairs_hook=_unique_object)
     if not isinstance(lock, dict):
         raise ValueError('Invalid build-lock.json')
     version = lock.get('version')
@@ -89,20 +94,21 @@ def stage_apk(root, source, destination):
 
 
 def inspect_signer(log, pin):
-    expected = pin.read_text(encoding='ascii').strip()
+    expected = _read_bounded_text(pin, 'ascii', 'certificate SHA-256 pin').strip()
     if not re.fullmatch(r'[0-9a-f]{64}', expected):
         raise ValueError('Invalid development certificate SHA-256 pin')
-    trace = log.read_text(encoding='utf-8')
+    trace = _read_bounded_text(log, 'utf-8', 'apksigner log')
     counts = re.findall(r'^Number of signers: ([0-9]+)[ \t]*\r?$', trace, re.M)
     digest_lines = re.findall(r'^[^\r\n]*certificate SHA-256 digest:[^\r\n]*$', trace, re.M)
     hashes = re.findall(r'^Signer #([1-9][0-9]*) certificate SHA-256 digest: ([0-9a-fA-F]{64})[ \t]*\r?$',
                         trace, re.M)
     other_signers = re.findall(r'^Signer #(?!1\b)\S+', trace, re.M)
     source_stamp = re.search(r'^(?:Verified for SourceStamp:[ \t]*true\b|SourceStamp Signer\b)', trace, re.M)
+    explicit_error = re.search(r'^(?:DOES NOT VERIFY\b|ERROR:)', trace, re.M)
     modern_schemes = re.findall(r'^Verified using v(?:2|3(?:\.1)?) scheme \([^)\r\n]+\):[ \t]*(true|false)[ \t]*\r?$',
                                 trace, re.M)
     if (counts != ['1'] or len(digest_lines) != 1 or len(hashes) != 1 or other_signers
-            or source_stamp is not None or 'true' not in modern_schemes
+            or source_stamp is not None or explicit_error is not None or 'true' not in modern_schemes
             or hashes[0][0] != '1' or hashes[0][1].lower() != expected):
         raise ValueError('APK does not have exactly the pinned Chromium development signer')
 
@@ -124,10 +130,15 @@ def inspect_zip(apk_path):
         names = {info.filename: info for info in entries}
         if len(names) != len(entries) or any(info.filename != info.orig_filename for info in entries):
             raise ValueError('APK contains duplicate or ambiguous ZIP entry names')
-        for name in names:
-            if (not name or name.startswith('/') or '\\' in name
-                    or any(part in ('.', '..') for part in name.split('/'))):
+        for name, info in names.items():
+            trimmed = name[:-1] if info.is_dir() else name
+            if (not trimmed or name.startswith('/') or '\\' in name
+                    or any(ord(ch) < 0x20 or ord(ch) == 0x7f for ch in name)
+                    or any(part in ('', '.', '..') for part in trimmed.split('/'))):
                 raise ValueError(f'APK contains unsafe ZIP entry path: {name!r}')
+            mode_type = stat.S_IFMT(info.external_attr >> 16)
+            if mode_type not in (0, stat.S_IFDIR if info.is_dir() else stat.S_IFREG):
+                raise ValueError(f'APK contains irregular ZIP entry mode: {name!r}')
         for name in ('AndroidManifest.xml', 'classes.dex'):
             if name not in names or names[name].is_dir() or names[name].file_size <= 0:
                 raise ValueError(f'APK missing non-empty root {name}')
@@ -188,19 +199,29 @@ def inspect_badging(aapt2, apk_path, locked_version):
         raise ValueError('APK missing a positive versionCode')
     if re.search(r'^application-debuggable\b', badging, re.M):
         raise ValueError('APK must not be debuggable (android:debuggable=true)')
+    if re.search(r'^(?:testOnly=|application-is-test-only\b)', badging, re.M):
+        raise ValueError('APK must not be marked testOnly')
     abi_lines = re.findall(r'^native-code:[ \t]*([^\r\n]+)$', badging, re.M)
     if not abi_lines:
         raise ValueError('aapt2 output missing native-code line')
     if (len(abi_lines) != 1 or not re.fullmatch(r"[ \t]*'arm64-v8a'[ \t]*", abi_lines[0])
             or re.search(r'^alt-native-code:', badging, re.M)):
         raise ValueError('APK native-code must declare only arm64-v8a')
-    min_sdks = re.findall(r"^sdkVersion:'([^']+)'[ \t]*\r?$", badging, re.M)
-    target_sdks = re.findall(r"^targetSdkVersion:'([^']+)'[ \t]*\r?$", badging, re.M)
-    if len(min_sdks) > 1 or len(target_sdks) > 1:
-        raise ValueError('aapt2 output contains duplicate SDK version lines')
+
+    def _parse_sdk_field(tag):
+        raw_lines = re.findall(rf'^{tag}:([^\r\n]*)$', badging, re.M)
+        if len(raw_lines) > 1:
+            raise ValueError('aapt2 output contains duplicate SDK version lines')
+        if not raw_lines:
+            return None
+        m = re.fullmatch(r"'([^'\r\n]+)'[ \t]*\r?", raw_lines[0])
+        if not m:
+            raise ValueError(f'aapt2 output has malformed {tag} line')
+        return m[1]
+
     return dict(package=expected_package, version_code=attrs['versionCode'],
-                min_sdk=min_sdks[0] if min_sdks else None,
-                target_sdk=target_sdks[0] if target_sdks else None)
+                min_sdk=_parse_sdk_field('sdkVersion'),
+                target_sdk=_parse_sdk_field('targetSdkVersion'))
 
 
 def inspect_apk(apk_path, lock_path, aapt2, log, pin, metadata):
