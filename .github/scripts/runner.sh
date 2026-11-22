@@ -79,7 +79,7 @@ realpath_exact() {
 # Resolve symlinked ancestor directories without dereferencing the leaf itself,
 # matching the canonical paths recorded in /proc/self/mountinfo.
 resolve_mount_parent() {
-  local __rm_out=$1 __rm_path='' __rm_suffix='' __rm_parent __rm_resolved __rm_walked=0
+  local __rm_out=$1 __rm_path='' __rm_suffix='' __rm_parent __rm_resolved
   normalize_mount_path __rm_path "$2"
   if [[ "$__rm_path" == / ]]; then
     printf -v "$__rm_out" '%s' /
@@ -88,12 +88,11 @@ resolve_mount_parent() {
   __rm_parent=${__rm_path%/*}
   __rm_suffix="/${__rm_path##*/}"
   while [[ -n "$__rm_parent" && ! -e "$__rm_parent" && ! -L "$__rm_parent" ]]; do
-    __rm_walked=1
     __rm_suffix="/${__rm_parent##*/}${__rm_suffix}"
     __rm_parent=${__rm_parent%/*}
   done
   realpath_exact __rm_resolved "${__rm_parent:-/}" || runner_fail "Cannot resolve ancestor of $__rm_path"
-  if (( __rm_walked )) && [[ ! -d "$__rm_resolved" || ! -x "$__rm_resolved" ]]; then
+  if [[ ! -d "$__rm_resolved" || ! -x "$__rm_resolved" ]]; then
     runner_fail "Cannot resolve ancestor of $__rm_path"
   fi
   [[ "$__rm_resolved" != / ]] || __rm_resolved=''
