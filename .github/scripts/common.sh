@@ -54,7 +54,7 @@ fail() { echo "::error::$*" >&2; exit 1; }
 # find exit code. Stop on that predicate explicitly, before traversing the dir.
 # Prefix a non-empty marker so a newline-only name survives command substitution.
 make_dirs_removable() {
-  local root=$1 failed_dir
+  local root=${1:-} failed_dir
   [[ -n "$root" ]] || fail 'make_dirs_removable requires a directory path'
   [[ "$root" == /* || "$root" == . || "$root" == ./* || "$root" == .. || "$root" == ../* ]] \
     || root="./$root"
