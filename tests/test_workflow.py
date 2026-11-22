@@ -395,6 +395,29 @@ class Deadline(unittest.TestCase):
         code = 'import signal,time; signal.signal(signal.SIGINT,signal.SIG_IGN); time.sleep(20)'
         self.assertEqual(self.run_command(code, 0.5, 0.1), 'failed:shutdown-timeout')
 
+    def test_orderly_deadline_waits_for_interrupted_descendants(self):
+        # Ninja reaps only its direct children: a descendant of an interrupted edge got
+        # the same SIGINT and may still be exiting when Ninja itself has returned.
+        def stop_with_descendant(on_sigint, grace):
+            child = ('import signal, sys, time\n'
+                     f'signal.signal(signal.SIGINT, {on_sigint})\n'
+                     'print(1, flush=True)\n'
+                     'time.sleep(30)\n')
+            parent = ('import os, signal, subprocess, sys, time\n'
+                      f'c = subprocess.Popen([sys.executable, "-c", {child!r}], '
+                      'stdout=subprocess.PIPE, preexec_fn=os.setpgrp)\n'
+                      'assert c.stdout.readline() == b"1\\n"\n'
+                      'def stop(*_):\n'
+                      '    os.killpg(c.pid, signal.SIGINT)\n'
+                      '    os._exit(2)\n'
+                      'signal.signal(signal.SIGINT, stop)\n'
+                      'time.sleep(30)\n')
+            return self.run_command(parent, 1.5, grace)
+
+        self.assertEqual(stop_with_descendant('lambda *a: (time.sleep(0.5), sys.exit(0))', 5), 'running')
+        # The stop grace bounds the wait; whatever still needs SIGKILL is not resumable.
+        self.assertRegex(stop_with_descendant('signal.SIG_IGN', 1), r'^failed:forced-process-cleanup\(\d+\)$')
+
     def test_kill_session_refuses_success_with_active_detached_child(self):
         with tempfile.TemporaryDirectory() as tmp:
             pidfile = Path(tmp) / 'child.pid'
