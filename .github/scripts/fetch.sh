@@ -55,7 +55,13 @@ mkdir -p "$CR_ROOT/src/out/Release"
 cp "$GITHUB_WORKSPACE/config/args.gn" "$CR_ROOT/src/out/Release/args.gn"
 cp "$GITHUB_WORKSPACE/config/args.gn" "$CR_ROOT/metadata/args.gn"
 cd "$CR_ROOT/src"
-[[ -f buildtools/linux64/gn && -x buildtools/linux64/gn && -f third_party/ninja/ninja && -x third_party/ninja/ninja ]] || fail 'Expected Chromium GN/Ninja binaries missing'
+real_root=$(/usr/bin/realpath -e -- "$CR_ROOT") || fail 'Chromium build root missing'
+[[ "$real_root" != / ]] || fail 'Invalid Chromium build root'
+for rel_tool in buildtools/linux64/gn third_party/ninja/ninja; do
+  resolved_tool=$(/usr/bin/realpath -e -- "$rel_tool") || fail 'Expected Chromium GN/Ninja binaries missing'
+  [[ "$resolved_tool" == "$real_root/"* && -f "$resolved_tool" && -x "$resolved_tool" ]] \
+    || fail 'Expected Chromium GN/Ninja binaries missing'
+done
 buildtools/linux64/gn gen out/Release --fail-on-unused-args
 [[ -f out/Release/build.ninja ]] || fail 'gn gen did not produce out/Release/build.ninja'
 # Record GN's effective arguments, not just the overrides.
