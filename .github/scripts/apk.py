@@ -94,7 +94,7 @@ def inspect_signer(log, pin):
         raise ValueError('Invalid development certificate SHA-256 pin')
     trace = log.read_text(encoding='utf-8')
     counts = re.findall(r'^Number of signers: ([0-9]+)[ \t]*\r?$', trace, re.M)
-    digest_lines = re.findall(r'^Signer #\S+ certificate SHA-256 digest:[^\r\n]*$', trace, re.M)
+    digest_lines = re.findall(r'^[^\r\n]*certificate SHA-256 digest:[^\r\n]*$', trace, re.M)
     hashes = re.findall(r'^Signer #([1-9][0-9]*) certificate SHA-256 digest: ([0-9a-fA-F]{64})[ \t]*\r?$',
                         trace, re.M)
     other_signers = re.findall(r'^Signer #(?!1\b)\S+', trace, re.M)
