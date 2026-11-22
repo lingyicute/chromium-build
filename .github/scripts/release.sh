@@ -14,8 +14,10 @@ build_tools_root="$CR_ROOT/src/third_party/android_sdk/public/build-tools"
 apksigner_list=$(mktemp "$TMPDIR/chromium-apksigner.XXXXXX")
 apk_meta=$(mktemp "$TMPDIR/chromium-apk-meta.XXXXXX.json")
 trap 'rm -f -- "$apksigner_list" "$apk_meta"' EXIT
-find "$build_tools_root" -mindepth 2 -maxdepth 2 ! -path "$build_tools_root/.*/*" \
-  -name apksigner -xtype f -executable -print0 | sort -zV | tail -z -n 1 > "$apksigner_list"
+[[ "$build_tools_root" == /* || "$build_tools_root" == ./* || "$build_tools_root" == ../* ]] \
+  || build_tools_root="./$build_tools_root"
+find -H "$build_tools_root" -mindepth 1 -maxdepth 1 -name '.*' -prune -o \
+  -mindepth 2 -maxdepth 2 -name apksigner -xtype f -executable -print0 | sort -zV | tail -z -n 1 > "$apksigner_list"
 apksigner=''
 IFS= read -r -d '' apksigner < "$apksigner_list" || true
 [[ -n "$apksigner" ]] || fail 'Chromium-managed Android build-tools apksigner missing'
@@ -23,11 +25,16 @@ build_tools_dir=$(dirname -- "$apksigner")
 export JAVA_HOME="$CR_ROOT/src/third_party/jdk/current"
 # Prepend Chromium JDK to clean system PATH because apksigner wrappers invoke `java` via PATH.
 export PATH="$JAVA_HOME/bin:/usr/bin:/bin:/usr/sbin:/sbin"
-real_root=$(/usr/bin/realpath -e -- "$CR_ROOT") || fail 'Chromium build root missing'
+resolve_exact() {
+  local __re_out=$1 __re_raw
+  __re_raw=$(/usr/bin/realpath -e -- "$2" && printf x) || return 1
+  printf -v "$__re_out" '%s' "${__re_raw%$'\n'x}"
+}
+resolve_exact real_root "$CR_ROOT" || fail 'Chromium build root missing'
 [[ "$real_root" != / ]] || fail 'Invalid Chromium build root'
 require_build_tool() {
   local resolved
-  resolved=$(/usr/bin/realpath -e -- "$1") || fail "Chromium-managed Android tool missing: $1"
+  resolve_exact resolved "$1" || fail "Chromium-managed Android tool missing: $1"
   [[ "$resolved" == "$real_root/"* && -f "$resolved" && -x "$resolved" ]] \
     || fail "Expected an executable tool inside the Chromium tree: $1"
 }
