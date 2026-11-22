@@ -10,6 +10,8 @@ archive_relay_tree() (
   # Include hidden entries but never archive "." itself: its parent may not
   # allow removal of the relay root when tar uses --remove-files.
   unset GLOBIGNORE
+  set +f
+  shopt -u failglob
   shopt -s dotglob nullglob
   shopt -s globskipdots 2>/dev/null || true
   entries=(*)
