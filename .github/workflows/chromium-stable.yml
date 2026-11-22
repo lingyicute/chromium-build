@@ -143,13 +143,17 @@ jobs:
                        and all(successful_checkpoint(n) for n in order[:-1]))
           if len(completed) == 1:
               idx = order.index(completed[0])
-              ok = (stage_result(completed[0]) == 'success'
-                    and valid_artifact_id(stage_output(completed[0], 'apk-id'))
-                    and stage_output(completed[0], 'artifact-id') == ''
-                    and stage_output(completed[0], 'sha256') == ''
-                    and all(successful_checkpoint(n) for n in order[:idx])
-                    and all(clean_skipped(n) for n in order[idx + 1:]))
+              valid_completion_chain = (
+                  stage_output(completed[0], 'artifact-id') == ''
+                  and stage_output(completed[0], 'sha256') == ''
+                  and all(successful_checkpoint(n) for n in order[:idx])
+                  and all(clean_skipped(n) for n in order[idx + 1:])
+              )
+              ok = (valid_completion_chain
+                    and stage_result(completed[0]) == 'success'
+                    and valid_artifact_id(stage_output(completed[0], 'apk-id')))
           else:
+              valid_completion_chain = False
               ok = False
 
           if ok:
@@ -158,16 +162,14 @@ jobs:
               reason = 'FAILED: `prepare` was skipped (workflow may only run from the default branch).'
           elif len(completed) > 1:
               reason = 'FAILED: multiple stages reported `completed`: ' + ', '.join(completed) + '.'
-          elif (len(completed) == 1 and all(successful_checkpoint(n) for n in order[:order.index(completed[0])])
-                and stage_result(completed[0]) == 'cancelled'):
+          elif valid_completion_chain and stage_result(completed[0]) == 'cancelled':
               reason = f'FAILED: `{completed[0]}` was cancelled after building the APK, before publication completed.'
-          elif (len(completed) == 1 and all(successful_checkpoint(n) for n in order[:order.index(completed[0])])
-                and stage_result(completed[0]) != 'success'):
+          elif valid_completion_chain and stage_result(completed[0]) != 'success':
               reason = (f'FAILED: `{completed[0]}` built the APK, but verifying or uploading it failed; '
                         'an `unverified-apk-*` artifact may remain, for inspection only.')
           elif errors:
               reason = 'FAILED: required stage(s) failed or were cancelled: ' + ', '.join(errors) + '.'
-          elif completed and not valid_artifact_id(stage_output(completed[0], 'apk-id')):
+          elif valid_completion_chain and not valid_artifact_id(stage_output(completed[0], 'apk-id')):
               reason = f'FAILED: `{completed[0]}` reported completion without a confirmed APK artifact.'
           elif exhausted:
               reason = 'FAILED: prepare and all 8 build stages ran without finishing; stage budget was exhausted.'
