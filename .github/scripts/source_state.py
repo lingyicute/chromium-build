@@ -76,21 +76,37 @@ def read_lock(root, workspace):
 
 def verify_source(root, lock):
     resolved_root = root.resolve(strict=True)
-    git_env = dict(os.environ, GIT_CEILING_DIRECTORIES=str(resolved_root))
+    git_env = {k: v for k, v in os.environ.items() if not k.startswith('GIT_')}
+    git_env.update(
+        GIT_CEILING_DIRECTORIES=str(resolved_root),
+        GIT_CONFIG_NOSYSTEM='1',
+        GIT_CONFIG_GLOBAL=os.devnull,
+        GIT_TERMINAL_PROMPT='0',
+    )
     for directory, field in (('src', 'chromium_revision'), ('depot_tools', 'depot_tools_revision')):
         repo = root / directory
         gitdir = repo / '.git'
         if repo.is_symlink() or not gitdir.is_dir() or gitdir.is_symlink():
             raise ValueError(f'{directory} is missing a real .git directory')
+        objects_dir = gitdir / 'objects'
+        if objects_dir.is_symlink():
+            raise ValueError(f'{directory} has a symlinked Git objects directory')
+        for alt in ('alternates', 'http-alternates'):
+            alt_path = objects_dir / 'info' / alt
+            if alt_path.exists() or alt_path.is_symlink():
+                raise ValueError(f'{directory} uses external Git object alternates')
         git = ['/usr/bin/git', '--no-optional-locks', '--no-replace-objects',
+               '-c', 'core.hooksPath=/dev/null',
                '-c', 'core.fsmonitor=false', '-c', 'core.filemode=true',
                '-c', 'core.symlinks=true', '-c', 'core.autocrlf=false',
                '-c', 'core.ignorecase=false', '-C', str(repo)]
+        resolved_gitdir = str(gitdir.resolve())
         fields = subprocess.check_output(
-            [*git, 'rev-parse', '--show-toplevel', '--absolute-git-dir', 'HEAD^{commit}'],
+            [*git, 'rev-parse', '--path-format=absolute',
+             '--show-toplevel', '--git-dir', '--git-common-dir', 'HEAD^{commit}'],
             env=git_env, text=True,
         ).splitlines()
-        if fields != [str(repo.resolve()), str(gitdir.resolve()), lock[field]]:
+        if fields != [str(repo.resolve()), resolved_gitdir, resolved_gitdir, lock[field]]:
             raise ValueError(f'{directory} worktree or revision mismatch')
         # Reject assume-unchanged or skip-worktree index bits on non-gitlink files,
         # which would make git status silently ignore modified tracked files.
