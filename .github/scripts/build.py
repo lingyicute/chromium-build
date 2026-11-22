@@ -239,6 +239,7 @@ def supervise(command, seconds, grace=STOP_GRACE_SECONDS, env=None, cancel_signa
                         os.killpg(p.pid, signal.SIGINT)
                     except ProcessLookupError:
                         signalled = False
+                stop_deadline = monotonic_now() + grace
                 try:
                     rc = wait_for_ninja(p, grace if signalled else min(grace, 1), cancel_signal)
                 except subprocess.TimeoutExpired:
@@ -248,6 +249,13 @@ def supervise(command, seconds, grace=STOP_GRACE_SECONDS, env=None, cancel_signa
                         result = 'completed'
                     elif signalled and rc in NINJA_INTERRUPTED:
                         result = 'running'
+                        # Ninja reaps only its direct children. Descendants of the edges it
+                        # interrupted got the same SIGINT; let them finish exiting within the
+                        # rest of the stop grace so that only real stragglers need SIGKILL.
+                        while (_live_session_pids(p.pid, protected_children=protected_children)
+                               and monotonic_now() < stop_deadline):
+                            check_cancelled(cancel_signal)
+                            time.sleep(0.05)
                     else:
                         # Signal death is not Ninja acknowledging edge cleanup.
                         result = f'failed:{rc}'
