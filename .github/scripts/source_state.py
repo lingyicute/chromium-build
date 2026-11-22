@@ -48,7 +48,10 @@ def read_metadata_json(path, root=None):
 
 
 def read_lock(root, workspace):
-    lock = read_metadata_json(root / 'metadata/build-lock.json', root=root)
+    meta = root / 'metadata'
+    if meta.is_symlink() or not meta.is_dir():
+        raise ValueError('Build metadata directory must be a real directory')
+    lock = read_metadata_json(meta / 'build-lock.json', root=root)
     if not isinstance(lock, dict):
         raise ValueError('Invalid build-lock.json')
     repository, workflow_sha, run_id = (os.environ[key] for key in
@@ -60,7 +63,9 @@ def read_lock(root, workspace):
     if (lock.get('source') != SOURCE or lock.get('release_api') != URL
             or lock.get('target') != 'chrome_public_apk' or lock.get('architecture') != 'arm64'):
         raise ValueError('Build lock source/target/architecture or release API mismatch')
-    expected_depot = (workspace / 'config/depot_tools_revision.txt').read_text(encoding='utf-8').strip()
+    expected_depot = read_bounded_bytes(
+        workspace / 'config/depot_tools_revision.txt', root=workspace,
+    ).decode('utf-8').strip()
     if not REVISION.fullmatch(expected_depot) or lock.get('depot_tools_revision') != expected_depot:
         raise ValueError('depot_tools pin changed')
     revision = lock.get('chromium_revision')
@@ -69,7 +74,7 @@ def read_lock(root, workspace):
     version = lock.get('version')
     if not isinstance(version, str) or not VERSION_PATTERN.fullmatch(version):
         raise ValueError('Invalid version in build-lock.json')
-    if validate(read_metadata_json(root / 'metadata/chromiumdash.json', root=root)) != (version, revision):
+    if validate(read_metadata_json(meta / 'chromiumdash.json', root=root)) != (version, revision):
         raise ValueError('ChromiumDash snapshot does not match the build lock')
     return lock
 
@@ -89,12 +94,19 @@ def verify_source(root, lock):
         if repo.is_symlink() or not gitdir.is_dir() or gitdir.is_symlink():
             raise ValueError(f'{directory} is missing a real .git directory')
         objects_dir = gitdir / 'objects'
-        if objects_dir.is_symlink():
-            raise ValueError(f'{directory} has a symlinked Git objects directory')
+        if objects_dir.is_symlink() or not objects_dir.is_dir():
+            raise ValueError(f'{directory} has a symlinked or missing Git objects directory')
+        for dirpath, dirnames, filenames in os.walk(gitdir):
+            base = Path(dirpath)
+            if any((base / name).is_symlink() for name in (*dirnames, *filenames)):
+                raise ValueError(f'{directory} contains a symlink inside .git')
         for alt in ('alternates', 'http-alternates'):
             alt_path = objects_dir / 'info' / alt
             if alt_path.exists() or alt_path.is_symlink():
                 raise ValueError(f'{directory} uses external Git object alternates')
+        info_attrs = gitdir / 'info/attributes'
+        if info_attrs.exists() or info_attrs.is_symlink():
+            raise ValueError(f'{directory} uses local Git info/attributes')
         git = ['/usr/bin/git', '--no-optional-locks', '--no-replace-objects',
                '-c', 'core.hooksPath=/dev/null',
                '-c', 'core.fsmonitor=false', '-c', 'core.filemode=true',
@@ -108,6 +120,12 @@ def verify_source(root, lock):
         ).splitlines()
         if fields != [str(repo.resolve()), resolved_gitdir, resolved_gitdir, lock[field]]:
             raise ValueError(f'{directory} worktree or revision mismatch')
+        local_cfg = subprocess.check_output(
+            [*git, 'config', '--local', '--list', '--name-only', '-z'], env=git_env,
+        )
+        for cfg_key in local_cfg.split(b'\x00'):
+            if cfg_key and re.match(rb'^(?:filter|diff|merge)\.', cfg_key):
+                raise ValueError(f'{directory} has unsafe driver configuration in .git/config')
         # Reject assume-unchanged or skip-worktree index bits on non-gitlink files,
         # which would make git status silently ignore modified tracked files.
         indexed = subprocess.check_output([*git, 'ls-files', '-v', '-s', '-z'], env=git_env)
@@ -160,7 +178,7 @@ def verify_restore(root, workspace, stage):
                 raise ValueError(f'Checkpoint must contain running stages 00 through {int(stage) - 1:02d}')
         if history.read(1):
             raise ValueError(f'Checkpoint has unexpected stages for resuming {stage}')
-    expected_args = (workspace / 'config/args.gn').read_bytes()
+    expected_args = read_bounded_bytes(workspace / 'config/args.gn', root=workspace)
     for args_path in ('src/out/Release/args.gn', 'metadata/args.gn'):
         try:
             actual_args = read_bounded_bytes(root / args_path, limit=max(MAX_BYTES, len(expected_args)), root=root)
