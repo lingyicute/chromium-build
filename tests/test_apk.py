@@ -77,3 +77,20 @@ class StageApk(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn('outside the build tree', result.stderr)
         self.assertFalse(self.destination.exists())
+
+
+class InspectSigner(unittest.TestCase):
+    def test_source_stamp_signer_label_is_rejected(self):
+        pin = SCRIPT.parents[2] / 'config/debug_signer_sha256.txt'
+        fingerprint = pin.read_text().strip()
+        valid = ('Verified using v2 scheme (APK Signature Scheme v2): true\n'
+                 f'Number of signers: 1\nSigner #1 certificate SHA-256 digest: {fingerprint}\n')
+        with tempfile.TemporaryDirectory() as tmp:
+            log = Path(tmp) / 'apk-signature.txt'
+            log.write_text(valid)
+            apk.inspect_signer(log, pin)
+            # apksigner --print-certs labels the stamp certificate "Source Stamp Signer".
+            for label in ('Source Stamp Signer', 'SourceStamp Signer'):
+                log.write_text(valid + f'{label} certificate DN: CN=Stamp\n')
+                with self.assertRaisesRegex(ValueError, 'pinned Chromium development signer'):
+                    apk.inspect_signer(log, pin)
