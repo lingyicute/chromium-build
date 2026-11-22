@@ -288,13 +288,12 @@ def log_status(line):
         pass
 
 
-def append_runner_record(root, stage, record):
+def _open_runner_history(root, stage):
     meta_dir = root / 'metadata'
     if meta_dir.is_symlink():
         raise RuntimeError('Build metadata directory must not be a symlink')
     meta_dir.mkdir(parents=True, exist_ok=True)
     history = meta_dir / 'runners.jsonl'
-    payload = (json.dumps(record, allow_nan=False) + '\n').encode('utf-8')
     fd = os.open(history, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_NONBLOCK, 0o644)
     try:
         st = os.fstat(fd)
@@ -307,6 +306,16 @@ def append_runner_record(root, stage, record):
             os.lseek(fd, -1, os.SEEK_END)
             if os.read(fd, 1) != b'\n':
                 raise RuntimeError('Existing runners.jsonl record is missing its trailing newline')
+        return fd
+    except BaseException:
+        os.close(fd)
+        raise
+
+
+def append_runner_record(root, stage, record):
+    payload = (json.dumps(record, allow_nan=False) + '\n').encode('utf-8')
+    fd = _open_runner_history(root, stage)
+    try:
         os.lseek(fd, 0, os.SEEK_END)
         view = memoryview(payload)
         written = 0
@@ -415,6 +424,15 @@ def main():
     src_dir = root / 'src'
     if src_dir.is_symlink() or not src_dir.is_dir():
         raise SystemExit('Chromium source directory must be a real directory')
+    ninja_bin = src_dir / 'third_party/ninja/ninja'
+    if not (ninja_bin.is_file() and ninja_bin.resolve().is_relative_to(root) and os.access(ninja_bin, os.X_OK)):
+        raise SystemExit('Chromium Ninja binary must be an executable inside the build root')
+    meta_dir = root / 'metadata'
+    if meta_dir.is_symlink() or (meta_dir.exists() and not meta_dir.is_dir()):
+        raise SystemExit('Build metadata directory must not be a symlink')
+    history = meta_dir / 'runners.jsonl'
+    if history.exists() or history.is_symlink():
+        os.close(_open_runner_history(root, stage))
     os.chdir(src_dir)
     env = dict(os.environ)
     env.setdefault('NINJA_STATUS', '[%f/%t %es] ')
