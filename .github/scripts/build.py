@@ -432,14 +432,15 @@ def main():
     summarize(f'- Stage {stage}: `{status}` after compiling for {elapsed / 60:.1f} min with -j{jobs}; '
               f'setup before compiling (runner prep, then fetch or download and restore) took {setup / 60:.1f} min.')
     summarize(f'- Stage {stage} resources: {usage}.')
-    try:
-        sys.stdout.flush()
-    except OSError:
-        devnull = os.open(os.devnull, os.O_WRONLY)
+    for stream in (sys.stdout, sys.stderr):
         try:
-            os.dup2(devnull, sys.stdout.fileno())
-        finally:
-            os.close(devnull)
+            stream.flush()
+        except OSError:
+            devnull = os.open(os.devnull, os.O_WRONLY)
+            try:
+                os.dup2(devnull, stream.fileno())
+            finally:
+                os.close(devnull)
 
 
 if __name__ == '__main__':
