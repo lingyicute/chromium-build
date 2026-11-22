@@ -63,24 +63,28 @@ done
 [[ -r /proc/swaps ]] || runner_fail 'Cannot inspect active runner swaps'
 exec 3< /proc/swaps
 IFS= read -r -u 3 _ || runner_fail 'Malformed /proc/swaps header'
-while IFS=$' \t' read -r -u 3 encoded_dev swap_type _; do
-  [[ -n "$encoded_dev" && "$swap_type" == file ]] || continue
-  decode_mount_path dev "$encoded_dev"
-  [[ "$dev" == /mnt/* ]] || continue
-  # Do not disable or remove a device, symlink, bind mount, or foreign file.
-  [[ -f "$dev" && ! -L "$dev" ]] || continue
-  real_dev=$(realpath -e -- "$dev") || continue
-  [[ "$real_dev" == /mnt/* && -f "$real_dev" && "$(stat -c '%d' -- "$real_dev")" == "$relay_device" ]] || continue
-  swap_checks=("$real_dev")
-  swap_parent=${real_dev%/*}
-  while [[ "$swap_parent" == /mnt/* ]]; do
-    swap_checks+=("$swap_parent")
-    swap_parent=${swap_parent%/*}
-  done
-  require_no_mount_targets "${swap_checks[@]}"
-  sudo -n swapoff -- "$real_dev" < /dev/null
-  sudo -n rm -f -- "$real_dev" < /dev/null
+encoded_dev=''; swap_type=''; swap_rest=''
+while IFS=$' \t' read -r -u 3 encoded_dev swap_type swap_rest; do
+  if [[ -n "$encoded_dev" && "$swap_type" == file ]]; then
+    decode_mount_path dev "$encoded_dev"
+    if [[ "$dev" == /mnt/* && -f "$dev" && ! -L "$dev" ]] && realpath_exact real_dev "$dev"; then
+      # Do not disable or remove a device, symlink, bind mount, or foreign file.
+      if [[ "$real_dev" == /mnt/* && -f "$real_dev" && "$(stat -c '%d' -- "$real_dev")" == "$relay_device" ]]; then
+        swap_checks=("$real_dev")
+        swap_parent=${real_dev%/*}
+        while [[ "$swap_parent" == /mnt/* ]]; do
+          swap_checks+=("$swap_parent")
+          swap_parent=${swap_parent%/*}
+        done
+        require_no_mount_targets "${swap_checks[@]}"
+        sudo -n swapoff -- "$real_dev" < /dev/null
+        sudo -n rm -f -- "$real_dev" < /dev/null
+      fi
+    fi
+  fi
+  encoded_dev=''; swap_type=''; swap_rest=''
 done
+[[ -z "${encoded_dev}${swap_type}${swap_rest}" ]] || runner_fail 'Malformed /proc/swaps'
 exec 3<&-
 # Reap every background deletion before failing so none keep running on error.
 cleanup_failed=0
