@@ -103,7 +103,7 @@ def inspect_signer(log, pin):
     hashes = re.findall(r'^Signer #([1-9][0-9]*) certificate SHA-256 digest: ([0-9a-fA-F]{64})[ \t]*\r?$',
                         trace, re.M)
     other_signers = re.findall(r'^Signer #(?!1\b)\S+', trace, re.M)
-    source_stamp = re.search(r'^(?:Verified for SourceStamp:[ \t]*true\b|SourceStamp Signer\b)', trace, re.M)
+    source_stamp = re.search(r'^(?:Verified for SourceStamp:[ \t]*true\b|Source ?Stamp Signer\b)', trace, re.M)
     explicit_error = re.search(r'^(?:DOES NOT VERIFY\b|ERROR:)', trace, re.M)
     modern_schemes = re.findall(r'^Verified using v(?:2|3(?:\.1)?) scheme \([^)\r\n]+\):[ \t]*(true|false)[ \t]*\r?$',
                                 trace, re.M)
