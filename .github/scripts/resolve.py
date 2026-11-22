@@ -176,6 +176,10 @@ def fetch_release_json(url=URL, timeout=90, attempts=FETCH_ATTEMPTS,
     if (parsed.scheme != 'https' or not parsed.hostname or parsed.fragment
             or parsed.username is not None or parsed.password is not None):
         raise ValueError('ChromiumDash URL must use https with a bare hostname')
+    expected_host = f'[{parsed.hostname}]' if ':' in parsed.hostname else parsed.hostname
+    expected_netloc = expected_host if port is None else f'{expected_host}:{port}'
+    if parsed.netloc.lower() != expected_netloc:
+        raise ValueError('ChromiumDash URL has an invalid port')
     if isinstance(attempts, bool) or not isinstance(attempts, int) or attempts < 1:
         raise ValueError('attempts must be a positive integer')
     if (isinstance(timeout, bool) or not isinstance(timeout, (int, float))
