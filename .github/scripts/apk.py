@@ -102,7 +102,7 @@ def inspect_signer(log, pin):
     modern_schemes = re.findall(r'^Verified using v(?:2|3(?:\.1)?) scheme \([^)\r\n]+\):[ \t]*(true|false)[ \t]*\r?$',
                                 trace, re.M)
     if (counts != ['1'] or len(digest_lines) != 1 or len(hashes) != 1 or other_signers
-            or source_stamp is not None or (modern_schemes and 'true' not in modern_schemes)
+            or source_stamp is not None or 'true' not in modern_schemes
             or hashes[0][0] != '1' or hashes[0][1].lower() != expected):
         raise ValueError('APK does not have exactly the pinned Chromium development signer')
 

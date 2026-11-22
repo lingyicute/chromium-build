@@ -994,7 +994,8 @@ class Hardening(unittest.TestCase):
             aapt2.chmod(0o755)
             meta = root / 'meta.json'
             signature = root / 'signature.txt'
-            valid_signer = f'Number of signers: 1\nSigner #1 certificate SHA-256 digest: {fingerprint}\n'
+            valid_signer = ('Verified using v2 scheme (APK Signature Scheme v2): true\n'
+                            f'Number of signers: 1\nSigner #1 certificate SHA-256 digest: {fingerprint}\n')
 
             def apk_fixture(dex_name='classes.dex', dex_data=dex, lib_name='lib/arm64-v8a/libchrome.so',
                             lib=elf, extra_lib=None):
