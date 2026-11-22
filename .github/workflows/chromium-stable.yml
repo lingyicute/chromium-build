@@ -158,9 +158,11 @@ jobs:
               reason = 'FAILED: `prepare` was skipped (workflow may only run from the default branch).'
           elif len(completed) > 1:
               reason = 'FAILED: multiple stages reported `completed`: ' + ', '.join(completed) + '.'
-          elif len(completed) == 1 and stage_result(completed[0]) == 'cancelled':
+          elif (len(completed) == 1 and all(successful_checkpoint(n) for n in order[:order.index(completed[0])])
+                and stage_result(completed[0]) == 'cancelled'):
               reason = f'FAILED: `{completed[0]}` was cancelled after building the APK, before publication completed.'
-          elif len(completed) == 1 and stage_result(completed[0]) != 'success':
+          elif (len(completed) == 1 and all(successful_checkpoint(n) for n in order[:order.index(completed[0])])
+                and stage_result(completed[0]) != 'success'):
               reason = (f'FAILED: `{completed[0]}` built the APK, but verifying or uploading it failed; '
                         'an `unverified-apk-*` artifact may remain, for inspection only.')
           elif errors:
