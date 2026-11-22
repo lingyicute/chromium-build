@@ -112,3 +112,18 @@ class RunnerGuards(unittest.TestCase):
             newline_dir.chmod(0o755)
             self.assertNotEqual(result.returncode, 0)
             self.assertIn('Could not grant owner access', result.stderr)
+
+            result = self.run_guard('source "$1/common.sh"; make_dirs_removable', target, RUNNER_TEMP=tmp)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn('requires a directory path', result.stderr)
+
+    def test_normalize_mount_path_rejects_non_canonical_segments(self):
+        for bad in ('/mnt//relay', '/mnt/relay/.', '/mnt/relay/..', '/mnt/./relay', '/mnt/../relay', '/.'):
+            with self.subTest(path=bad):
+                result = self.run_guard('source "$1/runner.sh"; normalize_mount_path out "$2"', bad)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn('must be canonical', result.stderr)
+        for good in ('/', '/usr/local/.ghcup', '/mnt/dir 1/'):
+            with self.subTest(path=good):
+                result = self.run_guard('source "$1/runner.sh"; normalize_mount_path out "$2"', good)
+                self.assertEqual(result.returncode, 0, result.stderr)
