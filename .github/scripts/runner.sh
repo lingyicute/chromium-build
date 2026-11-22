@@ -54,6 +54,11 @@ normalize_mount_path() {
   while [[ "$__nm_path" != / && "$__nm_path" == */ ]]; do
     __nm_path=${__nm_path%/}
   done
+  case "$__nm_path" in
+    *//*|*/.|*/..|*/./*|*/../*)
+      runner_fail "Mount check path must be canonical: $__nm_path"
+      ;;
+  esac
   printf -v "$__nm_out" '%s' "$__nm_path"
 }
 
