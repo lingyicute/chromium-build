@@ -24,5 +24,6 @@ archive_relay_tree() (
 )
 
 extract_relay_tree() {
+  [[ -n "${1:-}" && -d "$1" && ! -L "$1" ]] || fail 'extract_relay_tree requires a real directory'
   tar --no-same-owner -xpf - -C "$1"
 }
