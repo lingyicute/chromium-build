@@ -1785,6 +1785,60 @@ class Hardening(unittest.TestCase):
         self.assertNotIn('chromium-job-start', (ROOT / '.github/scripts/host.sh').read_text())
         self.assertIn("if: always() && steps.validate.outcome == 'success'", stage_yml)
 
+    def test_review_regressions(self):
+        from unittest import mock
+
+        with self.assertRaisesRegex(ValueError, 'invalid port'):
+            resolve.fetch_release_json(url='https://chromiumdash.appspot.com:0/x', opener=_FakeOpener([]))
+
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            pin = ROOT / 'config/debug_signer_sha256.txt'
+            fp = pin.read_text().strip()
+            sig = base / 'sig.txt'
+            apk_mod = load('apk')
+            # Missing v2/v3/v3.1 scheme lines (e.g. v1-only) must be rejected.
+            sig.write_text(f'Number of signers: 1\nSigner #1 certificate SHA-256 digest: {fp}\n')
+            with self.assertRaisesRegex(ValueError, 'pinned Chromium development signer'):
+                apk_mod.inspect_signer(sig, pin)
+            # Rotated v3/v3.1 certificate lineage lines must be rejected.
+            sig.write_text(
+                'Verified using v3 scheme (APK Signature Scheme v3): true\n'
+                'Number of signers: 1\n'
+                f'Signer #1 certificate SHA-256 digest: {fp}\n'
+                f"Signer #1 (minSdkVersion=28, maxSdkVersion=32) certificate SHA-256 digest: {'a' * 64}\n"
+            )
+            with self.assertRaisesRegex(ValueError, 'pinned Chromium development signer'):
+                apk_mod.inspect_signer(sig, pin)
+
+            # _open_exclusive_wo must unlink the created file if os.fdopen fails.
+            part = base / 'tree.part-00000'
+            with mock.patch.object(checkpoint.os, 'fdopen', side_effect=OSError('fdopen failed')):
+                with self.assertRaises(OSError):
+                    checkpoint._open_exclusive_wo(part)
+            self.assertFalse(part.exists())
+
+            # archive_relay_tree must isolate noglob (set -f) and failglob.
+            src = base / 'src'
+            src.mkdir()
+            (src / 'hello.txt').write_text('world')
+            archive = base / 'noglob.tar'
+            p = subprocess.run(
+                ['bash', '-euc',
+                 'set -f; shopt -s failglob; source "$1/common.sh"; source "$1/relay.sh"; '
+                 'archive_relay_tree "$2" > "$3"',
+                 '_', str(ROOT / '.github/scripts'), str(src), str(archive)],
+                env=dict(os.environ, RUNNER_TEMP=tmp), capture_output=True, text=True, timeout=10,
+            )
+            self.assertEqual(p.returncode, 0, p.stderr)
+            self.assertEqual(list(src.iterdir()), [])
+
+            # swapped_out_bytes rejects non-ASCII digits and trailing tokens.
+            vmstat = base / 'vmstat'
+            for bad_vm in ('pswpout \uff13\n', 'pswpout 3 extra\n', 'pswpout -1\n'):
+                vmstat.write_text(bad_vm)
+                self.assertIsNone(build.swapped_out_bytes(vmstat))
+
 
 if __name__ == '__main__':
     unittest.main()
