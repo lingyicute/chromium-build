@@ -168,9 +168,11 @@ def fetch_release_json(url=URL, timeout=90, attempts=FETCH_ATTEMPTS,
         raise ValueError('ChromiumDash URL must use https with a bare hostname')
     parsed = urllib.parse.urlsplit(url)
     try:
-        _ = parsed.port
+        port = parsed.port
     except ValueError as exc:
         raise ValueError('ChromiumDash URL has an invalid port') from exc
+    if port == 0:
+        raise ValueError('ChromiumDash URL has an invalid port')
     if (parsed.scheme != 'https' or not parsed.hostname or parsed.fragment
             or parsed.username is not None or parsed.password is not None):
         raise ValueError('ChromiumDash URL must use https with a bare hostname')
