@@ -71,7 +71,13 @@ done
     [[ -f "$dev" && ! -L "$dev" ]] || continue
     real_dev=$(realpath -e -- "$dev") || continue
     [[ "$real_dev" == /mnt/* && -f "$real_dev" && "$(stat -c '%d' -- "$real_dev")" == "$relay_device" ]] || continue
-    require_no_mount_targets "$real_dev"
+    swap_checks=("$real_dev")
+    swap_parent=${real_dev%/*}
+    while [[ "$swap_parent" == /mnt/* ]]; do
+      swap_checks+=("$swap_parent")
+      swap_parent=${swap_parent%/*}
+    done
+    require_no_mount_targets "${swap_checks[@]}"
     sudo -n swapoff -- "$real_dev"
     sudo -n rm -f -- "$real_dev"
   done
