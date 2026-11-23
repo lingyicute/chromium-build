@@ -95,10 +95,14 @@ cleanup=()
 (( cleanup_failed == 0 )) || { echo 'Failed to remove preinstalled runner directories' >&2; exit 1; }
 # Swap is only a fallback for linker/R8 peaks, not a replacement for physical
 # RAM. 16 GiB target; shrink only if / is unexpectedly small, never below 8 GiB.
+# On single-disk runners (/ and /mnt share one filesystem), keep >= 46 GiB free
+# so the 45 GiB tree headroom check still passes after swap extent overhead.
+min_root_free_gib=8
+(( ! relay_shares_root )) || min_root_free_gib=46
 swap_gib=16
 root_free_gib=$(/usr/bin/python3 -c 'import shutil; print(shutil.disk_usage("/").free // 2**30)')
-(( root_free_gib - swap_gib >= 8 )) || swap_gib=$(( root_free_gib - 8 ))
-(( swap_gib >= 8 )) || { echo "Only ${root_free_gib} GiB free on / after cleanup; cannot place a >= 8 GiB swap file" >&2; exit 1; }
+(( root_free_gib - swap_gib >= min_root_free_gib )) || swap_gib=$(( root_free_gib - min_root_free_gib ))
+(( swap_gib >= 8 )) || { echo "Only ${root_free_gib} GiB free on / after cleanup; cannot place a >= 8 GiB swap file while keeping >= ${min_root_free_gib} GiB free" >&2; exit 1; }
 sudo -n bash -c 'set -o noclobber; umask 077; : > /chromium-relay.swap && exec fallocate -l "$1" /chromium-relay.swap' _ "${swap_gib}G"
 sudo -n chmod 600 /chromium-relay.swap
 sudo -n mkswap /chromium-relay.swap >/dev/null
