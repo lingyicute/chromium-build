@@ -208,7 +208,7 @@ def inspect_badging(aapt2, apk_path, locked_version):
             raise ValueError('APK must be a regular file')
     badging = subprocess.check_output([str(aapt2), 'dump', 'badging', str(apk_path)],
                                       text=True, encoding='utf-8')
-    package_lines = re.findall(r'^package:[ \t]*([^\r\n]+)$', badging, re.M)
+    package_lines = re.findall(r'^package:([^\r\n]*)\r?$', badging, re.M)
     if len(package_lines) != 1:
         raise ValueError('aapt2 output must contain exactly one package line')
     if not re.fullmatch(rf'[ \t]*{PACKAGE_ATTR}(?:[ \t]+{PACKAGE_ATTR})*[ \t]*', package_lines[0]):
@@ -228,7 +228,7 @@ def inspect_badging(aapt2, apk_path, locked_version):
         raise ValueError('APK must not be debuggable (android:debuggable=true)')
     if re.search(r'^(?:testOnly=|application-is-test-only\b)', badging, re.M):
         raise ValueError('APK must not be marked testOnly')
-    abi_lines = re.findall(r'^native-code:[ \t]*([^\r\n]+)$', badging, re.M)
+    abi_lines = re.findall(r'^native-code:([^\r\n]*)\r?$', badging, re.M)
     if not abi_lines:
         raise ValueError('aapt2 output missing native-code line')
     if (len(abi_lines) != 1 or not re.fullmatch(r"[ \t]*'arm64-v8a'[ \t]*", abi_lines[0])
@@ -236,7 +236,7 @@ def inspect_badging(aapt2, apk_path, locked_version):
         raise ValueError('APK native-code must declare only arm64-v8a')
 
     def _parse_sdk_field(tag):
-        raw_lines = re.findall(rf'^{tag}:([^\r\n]*)$', badging, re.M)
+        raw_lines = re.findall(rf'^{tag}:([^\r\n]*)\r?$', badging, re.M)
         if len(raw_lines) > 1:
             raise ValueError('aapt2 output contains duplicate SDK version lines')
         if not raw_lines:
