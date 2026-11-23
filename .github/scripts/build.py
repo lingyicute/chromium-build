@@ -328,9 +328,9 @@ def append_runner_record(root, stage, record):
         os.close(fd)
 
 
-def summarize(line):
+def summarize(line, summary_path=None):
     """Append to the Actions job summary; a diagnostic must never fail the build."""
-    path = os.environ.get('GITHUB_STEP_SUMMARY')
+    path = os.environ.get('GITHUB_STEP_SUMMARY') if summary_path is None else summary_path
     if not path:
         return
     try:
@@ -390,16 +390,18 @@ def main():
     final_stage = stage == '08'
 
     root = Path(os.environ['CR_ROOT'])
+    summary_env = os.environ.get('GITHUB_STEP_SUMMARY', '')
+    summary_path = str(Path(summary_env).resolve()) if summary_env else ''
     raw_started = (Path(os.environ['RUNNER_TEMP']) / 'chromium-job-start').read_text(encoding='utf-8').strip()
     if not re.fullmatch(r'-?[0-9]+', raw_started):
         msg = f'Invalid job start timestamp: {raw_started!r}'
-        summarize(f'- Stage {stage}: `failed` before compiling; {msg}.')
+        summarize(f'- Stage {stage}: `failed` before compiling; {msg}.', summary_path)
         raise SystemExit(msg)
     started = int(raw_started)
     now = monotonic_now()
     if started > now:
         msg = f'Invalid future job start timestamp ({started} > {now:.1f})'
-        summarize(f'- Stage {stage}: `failed` before compiling; {msg}.')
+        summarize(f'- Stage {stage}: `failed` before compiling; {msg}.', summary_path)
         raise SystemExit(msg)
     remaining = compute_budget(started, now, final_stage=final_stage)
     setup = round(now - started, 1)
@@ -407,12 +409,13 @@ def main():
         msg = (f'Fetch/restore exhausted the time budget '
                f'(setup {setup / 60:.1f} min, remaining {remaining / 60:.1f} min); '
                f'refusing a no-progress checkpoint')
-        summarize(f'- Stage {stage}: `failed` before compiling; {msg}.')
+        summarize(f'- Stage {stage}: `failed` before compiling; {msg}.', summary_path)
         raise SystemExit(msg)
     output_path = os.environ.get('GITHUB_OUTPUT', '')
     if not output_path:
         raise SystemExit('Missing GITHUB_OUTPUT')
-    with open(output_path, 'a', encoding='utf-8'):
+    output_file = Path(output_path).resolve()
+    with open(output_file, 'a', encoding='utf-8'):
         pass  # Check writability before spending hours compiling.
     run_attempt = os.environ['GITHUB_RUN_ATTEMPT']
     if not re.fullmatch(r'[1-9][0-9]*', run_attempt):
@@ -450,8 +453,8 @@ def main():
              f"{'unknown' if disk_free is None else disk_free} GiB left free on the build disk")
     if status.startswith('failed:'):
         summarize(f'- Stage {stage}: `{status}` after compiling for {elapsed / 60:.1f} min '
-                  f'with -j{jobs}; setup before compiling took {setup / 60:.1f} min.')
-        summarize(f'- Stage {stage} resources: {usage}.')
+                  f'with -j{jobs}; setup before compiling took {setup / 60:.1f} min.', summary_path)
+        summarize(f'- Stage {stage} resources: {usage}.', summary_path)
         # Heavy swapping or a full disk explains many failures (e.g. an OOM kill or ENOSPC).
         raise SystemExit(f'Build failed after {elapsed:.1f}s, NOT checkpointing: {status}; {usage}')
     if status == 'running' and final_stage:
@@ -465,12 +468,13 @@ def main():
     check_cancelled(cancel_signal)
     append_runner_record(root, stage, record)
     check_cancelled(cancel_signal)
-    with open(output_path, 'a', encoding='utf-8') as f:
+    with open(output_file, 'a', encoding='utf-8') as f:
         f.write(f'status={status}\n')
     log_status(f'Stage result: {status} ({elapsed:.1f}s)')
     summarize(f'- Stage {stage}: `{status}` after compiling for {elapsed / 60:.1f} min with -j{jobs}; '
-              f'setup before compiling (runner prep, then fetch or download and restore) took {setup / 60:.1f} min.')
-    summarize(f'- Stage {stage} resources: {usage}.')
+              f'setup before compiling (runner prep, then fetch or download and restore) took {setup / 60:.1f} min.',
+              summary_path)
+    summarize(f'- Stage {stage} resources: {usage}.', summary_path)
     for stream in (sys.stdout, sys.stderr):
         try:
             stream.flush()
