@@ -75,6 +75,12 @@ retry() {
   trap 'interrupted=130; (( sleep_pid == 0 )) || kill "$sleep_pid" 2>/dev/null || true' INT
   trap 'interrupted=143; (( sleep_pid == 0 )) || kill "$sleep_pid" 2>/dev/null || true' TERM
   for attempt in 1 2 3; do
+    if (( interrupted != 0 )); then
+      eval "${prev_int:-trap - INT}"
+      eval "${prev_term:-trap - TERM}"
+      echo "::error::Interrupted (exit $interrupted), aborting without retry: $*" >&2
+      exit "$interrupted"
+    fi
     rc=0
     "$@" || rc=$?
     if (( interrupted != 0 )); then
