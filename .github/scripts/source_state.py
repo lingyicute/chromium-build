@@ -79,7 +79,13 @@ def read_lock(root, workspace):
     return lock
 
 
+def _raise_walk_error(exc):
+    raise exc
+
+
 def verify_source(root, lock):
+    if root.is_symlink() or not root.is_dir():
+        raise ValueError('Build root must be a real directory')
     resolved_root = root.resolve(strict=True)
     git_env = {k: v for k, v in os.environ.items() if not k.startswith('GIT_')}
     git_env.update(
@@ -96,7 +102,7 @@ def verify_source(root, lock):
         objects_dir = gitdir / 'objects'
         if objects_dir.is_symlink() or not objects_dir.is_dir():
             raise ValueError(f'{directory} has a symlinked or missing Git objects directory')
-        for dirpath, dirnames, filenames in os.walk(gitdir):
+        for dirpath, dirnames, filenames in os.walk(gitdir, onerror=_raise_walk_error):
             base = Path(dirpath)
             if any((base / name).is_symlink() for name in (*dirnames, *filenames)):
                 raise ValueError(f'{directory} contains a symlink inside .git')
