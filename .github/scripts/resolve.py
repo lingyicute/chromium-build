@@ -57,25 +57,37 @@ def validate(releases):
     return version, revision
 
 
-def _header_value(headers, name):
+def _header_values(headers, name):
     if headers is None:
-        return None
-    if hasattr(headers, 'get'):
-        val = headers.get(name)
-        if val is not None:
-            return val
+        return []
     if hasattr(headers, 'items'):
         target = name.lower()
-        for k, v in headers.items():
-            if isinstance(k, str) and k.lower() == target:
-                return v
-    return None
+        return [v for k, v in headers.items() if isinstance(k, str) and k.lower() == target]
+    if hasattr(headers, 'get_all'):
+        return list(headers.get_all(name, []))
+    if isinstance(headers, (list, tuple)):
+        target = name.lower()
+        return [
+            item[1] for item in headers
+            if isinstance(item, tuple) and len(item) == 2
+            and isinstance(item[0], str) and item[0].lower() == target
+        ]
+    if hasattr(headers, 'get'):
+        val = headers.get(name)
+        return [] if val is None else [val]
+    return []
+
+
+def _header_value(headers, name):
+    values = _header_values(headers, name)
+    return values[0] if values else None
 
 
 def _retry_delay(attempt, retry_delay, headers=None, now=None):
     if retry_delay <= 0:
         return 0.0
-    raw_after = _header_value(headers, 'Retry-After') if len(_header_values(headers, 'Retry-After')) == 1 else None
+    values = _header_values(headers, 'Retry-After')
+    raw_after = values[0] if len(values) == 1 else None
     if isinstance(raw_after, str):
         text = raw_after.strip()
         if re.fullmatch(r'[0-9]+', text):
@@ -94,18 +106,6 @@ def _retry_delay(attempt, retry_delay, headers=None, now=None):
                 delta = (target - ref).total_seconds()
                 return max(0.0, min(delta, MAX_RETRY_AFTER_SECONDS))
     return min(retry_delay * (2.0 ** min(attempt - 1, 60)), MAX_RETRY_AFTER_SECONDS)
-
-
-def _header_values(headers, name):
-    if headers is None:
-        return []
-    if hasattr(headers, 'items'):
-        target = name.lower()
-        return [v for k, v in headers.items() if isinstance(k, str) and k.lower() == target]
-    if hasattr(headers, 'get_all'):
-        return list(headers.get_all(name, []))
-    val = _header_value(headers, name)
-    return [] if val is None else [val]
 
 
 def _content_length(headers):
