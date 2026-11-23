@@ -14,7 +14,7 @@ build_tools_root="$CR_ROOT/src/third_party/android_sdk/public/build-tools"
 apksigner_list=$(mktemp "$TMPDIR/chromium-apksigner.XXXXXX")
 apk_meta=$(mktemp "$TMPDIR/chromium-apk-meta.XXXXXX.json")
 trap 'rm -f -- "$apksigner_list" "$apk_meta"' EXIT
-[[ "$build_tools_root" == /* || "$build_tools_root" == ./* || "$build_tools_root" == ../* ]] \
+[[ "$build_tools_root" == /* || "$build_tools_root" == . || "$build_tools_root" == ./* || "$build_tools_root" == .. || "$build_tools_root" == ../* ]] \
   || build_tools_root="./$build_tools_root"
 # find's -mindepth/-maxdepth are global, so a depth-1 -prune cannot be combined
 # with a depth-2 match. Skip hidden version directories below instead: sort -V
@@ -64,9 +64,9 @@ ln -- "$apk" "$release/Chromium-Stable-arm64.apk"
 # The upload action omits hidden files; reject hidden or non-regular metadata
 # rather than publishing a checksum set that does not match the artifact.
 [[ -d "$CR_ROOT/metadata" && ! -L "$CR_ROOT/metadata" ]] || fail 'Build metadata directory missing'
-invalid=$(find "$CR_ROOT/metadata" -mindepth 1 \
-  \( -name '.*' -o ! \( -type f -o -type d \) \) -printf 'invalid' -quit)
-[[ -z "$invalid" ]] || fail 'Build metadata contains hidden or non-regular entries'
+invalid=$(LC_ALL=C find "$CR_ROOT/metadata" -mindepth 1 \
+  \( -name '.*' -o -name '*[![:alnum:]_.-]*' -o ! \( -type f -o -type d \) \) -printf 'invalid' -quit)
+[[ -z "$invalid" ]] || fail 'Build metadata contains hidden, unsafe, or non-regular entries'
 cp -a "$CR_ROOT/metadata" "$release/metadata"
 # SHA256SUMS authenticates nothing on its own; it detects corruption only.
 (cd "$release" && find . -type f ! -path './SHA256SUMS' -printf '%P\0' | sort -z | xargs -0r sha256sum -- > SHA256SUMS)
@@ -97,7 +97,7 @@ try:
     runners_path = release / 'metadata/runners.jsonl'
     records = ([json.loads(line) for line in runners_path.read_text(encoding='utf-8').splitlines() if line.strip()]
                if runners_path.is_file() else [])
-    total_minutes = sum((r.get('elapsed_seconds') or 0) for r in records) / 60
+    total_minutes = sum(((r.get('elapsed_seconds') if isinstance(r, dict) else 0) or 0) for r in records) / 60
     lines = [
         '### Built Chromium Android arm64 APK',
         f"- Version: `{clean(lock['version'])}` (`{clean(lock['chromium_revision'][:12])}`)",
