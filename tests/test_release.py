@@ -104,6 +104,12 @@ class ReleaseScript(unittest.TestCase):
         self.assertIn('build-tools apksigner missing', p.stderr)
         self.assertFalse((self.tmp / 'apksigner-used').exists())
 
+    def test_trailing_newline_in_build_tools_directory_is_preserved(self):
+        self.build_tools('36.0.0\n', aapt2=True)
+        p = self.release()
+        self.assertEqual(p.returncode, 0, p.stderr)
+        self.assertTrue((self.tmp / 'chromium-release/Chromium-Stable-arm64.apk').is_file())
+
 
 if __name__ == '__main__':
     unittest.main()
