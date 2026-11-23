@@ -164,7 +164,7 @@ jobs:
               reason = 'FAILED: multiple stages reported `completed`: ' + ', '.join(completed) + '.'
           elif valid_completion_chain and stage_result(completed[0]) == 'cancelled':
               reason = f'FAILED: `{completed[0]}` was cancelled after building the APK, before publication completed.'
-          elif valid_completion_chain and stage_result(completed[0]) != 'success':
+          elif valid_completion_chain and stage_result(completed[0]) == 'failure':
               reason = (f'FAILED: `{completed[0]}` built the APK, but verifying or uploading it failed; '
                         'an `unverified-apk-*` artifact may remain, for inspection only.')
           elif errors:
