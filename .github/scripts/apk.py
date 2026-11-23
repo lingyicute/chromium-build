@@ -117,17 +117,23 @@ def inspect_signer(log, pin):
     if not re.fullmatch(r'[0-9a-f]{64}', expected):
         raise ValueError('Invalid development certificate SHA-256 pin')
     trace = _read_bounded_text(log, 'utf-8', 'apksigner log')
+    count_lines = re.findall(r'^Number of signers:[^\r\n]*$', trace, re.M)
     counts = re.findall(r'^Number of signers: ([0-9]+)[ \t]*\r?$', trace, re.M)
     digest_lines = re.findall(r'^[^\r\n]*certificate SHA-256 digest:[^\r\n]*$', trace, re.M)
     hashes = re.findall(r'^Signer #([1-9][0-9]*) certificate SHA-256 digest: ([0-9a-fA-F]{64})[ \t]*\r?$',
                         trace, re.M)
     other_signers = re.findall(r'^Signer #(?!1\b)\S+', trace, re.M)
-    source_stamp = re.search(r'^(?:Verified for SourceStamp:[ \t]*true\b|Source ?Stamp Signer\b)', trace, re.M)
+    source_stamp_lines = re.findall(r'^Verified for SourceStamp:[^\r\n]*$', trace, re.M)
+    source_stamp_false = re.findall(r'^Verified for SourceStamp:[ \t]*false[ \t]*\r?$', trace, re.M)
+    source_stamp = (len(source_stamp_lines) != len(source_stamp_false)
+                    or re.search(r'^Source ?Stamp Signer\b', trace, re.M) is not None)
     explicit_error = re.search(r'^(?:DOES NOT VERIFY\b|ERROR:)', trace, re.M)
+    modern_scheme_lines = re.findall(r'^Verified using v(?:2|3(?:\.1)?) scheme\b[^\r\n]*$', trace, re.M)
     modern_schemes = re.findall(r'^Verified using v(?:2|3(?:\.1)?) scheme \([^)\r\n]+\):[ \t]*(true|false)[ \t]*\r?$',
                                 trace, re.M)
-    if (counts != ['1'] or len(digest_lines) != 1 or len(hashes) != 1 or other_signers
-            or source_stamp is not None or explicit_error is not None or 'true' not in modern_schemes
+    if (len(count_lines) != 1 or counts != ['1'] or len(digest_lines) != 1 or len(hashes) != 1
+            or other_signers or source_stamp or explicit_error is not None
+            or len(modern_scheme_lines) != len(modern_schemes) or 'true' not in modern_schemes
             or hashes[0][0] != '1' or hashes[0][1].lower() != expected):
         raise ValueError('APK does not have exactly the pinned Chromium development signer')
 
