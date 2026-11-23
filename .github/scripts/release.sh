@@ -27,7 +27,7 @@ while IFS= read -r -d '' candidate; do
   [[ "${version_dir##*/}" == .* ]] || apksigner=$candidate
 done < "$apksigner_list"
 [[ -n "$apksigner" ]] || fail 'Chromium-managed Android build-tools apksigner missing'
-build_tools_dir=$(dirname -- "$apksigner")
+build_tools_dir=${apksigner%/apksigner}
 export JAVA_HOME="$CR_ROOT/src/third_party/jdk/current"
 # Prepend Chromium JDK to clean system PATH because apksigner wrappers invoke `java` via PATH.
 export PATH="$JAVA_HOME/bin:/usr/bin:/bin:/usr/sbin:/sbin"
