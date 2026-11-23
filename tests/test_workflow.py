@@ -2261,6 +2261,141 @@ class Hardening(unittest.TestCase):
         self.assertIn('failed or were cancelled: prepare, part-01.', summary)
         self.assertNotIn('unverified-apk-*', summary)
 
+    def test_audit_round_three_fixes(self):
+        from email.message import Message
+        import zipfile
+        from unittest import mock
+
+        # 1. resolve.py: header pair sequences, Message duplicate Retry-After, and non-5xx >= 600.
+        self.assertEqual(resolve._retry_delay(1, 2.0, [('Retry-After', '11')]), 11.0)
+        msg = Message()
+        msg['Retry-After'] = '9'
+        self.assertEqual(resolve._retry_delay(1, 2.0, msg), 9.0)
+        msg['Retry-After'] = '30'
+        self.assertEqual(resolve._retry_delay(1, 2.0, msg), 2.0)
+        err600 = urllib.error.HTTPError(resolve.URL, 600, 'Nonstandard', {}, None)
+        opener = _FakeOpener([err600, _FakeResponse(b'[]')])
+        with self.assertRaises(urllib.error.HTTPError):
+            resolve.fetch_release_json(attempts=2, retry_delay=0.0, opener=opener)
+        self.assertEqual(opener.calls, 1)
+
+        scripts = ROOT / '.github/scripts'
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+
+            # 2. apk.py: symlinked apk in inspect_badging, symlinked metadata in inspect_apk, SourceStamp: maybe.
+            apk_mod = load('apk')
+            pin = ROOT / 'config/debug_signer_sha256.txt'
+            fp = pin.read_text().strip()
+            elf = (b'\x7fELF\x02\x01\x01' + bytes(9) + b'\x03\x00\xb7\x00\x01\x00\x00\x00'
+                   + bytes(28) + b'\x40\x00' + bytes(10))
+            dex = b'dex\n039\x00' + bytes(24) + b'\x70\x00\x00\x00' * 2 + b'\x78\x56\x34\x12' + bytes(68)
+            apk_path = base / 'app.apk'
+            with zipfile.ZipFile(apk_path, 'w') as zf:
+                zf.writestr('AndroidManifest.xml', b'm')
+                zf.writestr('classes.dex', dex)
+                zf.writestr('lib/arm64-v8a/libchrome.so', elf)
+            apk_link = base / 'app_link.apk'
+            apk_link.symlink_to(apk_path)
+            aapt2 = base / 'aapt2'
+            aapt2.write_text('#!/bin/sh\nprintf "%s\\n" '
+                             '"package: name=\'org.chromium.chrome\' versionCode=\'1\' versionName=\'159.0.8154.18\'" '
+                             '"native-code: \'arm64-v8a\'"\n')
+            aapt2.chmod(0o755)
+            with self.assertRaises(OSError):
+                apk_mod.inspect_badging(aapt2, apk_link, '159.0.8154.18')
+
+            lock_file = base / 'build-lock.json'
+            lock_file.write_text(json.dumps({'version': '159.0.8154.18'}))
+            sig = base / 'sig.txt'
+            sig.write_text('Verified using v2 scheme (APK Signature Scheme v2): true\n'
+                           'Verified for SourceStamp: maybe\n'
+                           f'Number of signers: 1\nSigner #1 certificate SHA-256 digest: {fp}\n')
+            with self.assertRaisesRegex(ValueError, 'pinned Chromium development signer'):
+                apk_mod.inspect_signer(sig, pin)
+
+            sig.write_text('Verified using v2 scheme (APK Signature Scheme v2): true\n'
+                           f'Number of signers: 1\nSigner #1 certificate SHA-256 digest: {fp}\n')
+            meta_target = base / 'keep.json'
+            meta_target.write_text('keep')
+            meta_link = base / 'meta_link.json'
+            meta_link.symlink_to(meta_target)
+            with self.assertRaises(OSError):
+                apk_mod.inspect_apk(apk_path, lock_file, aapt2, sig, pin, meta_link)
+            self.assertEqual(meta_target.read_text(), 'keep')
+
+            # 3. source_state.py: reject include/includeIf/worktreeConfig/attributesFile, ignore XDG attrs, fail unreadable .git.
+            cr = base / 'cr'
+            ws = base / 'ws'
+            for d in ('metadata', 'src/chrome', 'depot_tools'):
+                (cr / d).mkdir(parents=True)
+            (ws / 'config').mkdir(parents=True)
+            for repo in (cr / 'src', cr / 'depot_tools'):
+                subprocess.run(['git', 'init', '-q', str(repo)], check=True)
+                (repo / 'f.txt').write_text('v1\n')
+                subprocess.run(['git', '-C', str(repo), 'add', 'f.txt'], check=True)
+                subprocess.run(['git', '-C', str(repo), '-c', 'user.name=t', '-c', 'user.email=t@t',
+                                'commit', '-q', '-m', 'init'], check=True)
+            src_sha = subprocess.check_output(['git', '-C', str(cr / 'src'), 'rev-parse', 'HEAD'], text=True).strip()
+            dep_sha = subprocess.check_output(['git', '-C', str(cr / 'depot_tools'), 'rev-parse', 'HEAD'], text=True).strip()
+            (ws / 'config/depot_tools_revision.txt').write_text(dep_sha + '\n')
+            (cr / 'src/chrome/VERSION').write_text('MAJOR=159\nMINOR=0\nBUILD=8154\nPATCH=18\n')
+            lock = {'repository': 'o/r', 'run_id': '1', 'workflow_sha': 'c' * 40,
+                    'target': 'chrome_public_apk', 'architecture': 'arm64',
+                    'source': resolve.SOURCE, 'release_api': resolve.URL,
+                    'chromium_revision': src_sha, 'depot_tools_revision': dep_sha,
+                    'version': '159.0.8154.18'}
+            (cr / 'metadata/build-lock.json').write_text(json.dumps(lock))
+            (cr / 'metadata/chromiumdash.json').write_text(json.dumps([
+                {'channel': 'Stable', 'platform': 'Android', 'version': '159.0.8154.18',
+                 'hashes': {'chromium': src_sha}}]))
+            ss_env = dict(os.environ, CR_ROOT=str(cr), GITHUB_WORKSPACE=str(ws),
+                          GITHUB_REPOSITORY='o/r', GITHUB_RUN_ID='1', GITHUB_SHA='c' * 40)
+
+            for key, value in (('include.path', '/dev/null'),
+                               ('includeIf.gitdir:/.path', '/dev/null'),
+                               ('core.attributesFile', '/dev/null'),
+                               ('extensions.worktreeConfig', 'true')):
+                subprocess.run(['git', '-C', str(cr / 'src'), 'config', key, value], check=True)
+                res = subprocess.run([sys.executable, str(scripts / 'source_state.py'), 'verify-source'],
+                                     env=ss_env, capture_output=True, text=True)
+                subprocess.run(['git', '-C', str(cr / 'src'), 'config', '--unset', key], check=True)
+                self.assertNotEqual(res.returncode, 0, key)
+
+            wt_cfg = cr / 'src/.git/config.worktree'
+            wt_cfg.write_text('[filter "x"]\n\tclean = cat\n')
+            res = subprocess.run([sys.executable, str(scripts / 'source_state.py'), 'verify-source'],
+                                 env=ss_env, capture_output=True, text=True)
+            wt_cfg.unlink()
+            self.assertNotEqual(res.returncode, 0)
+
+            # XDG git attributes must be ignored when checking working tree changes.
+            xdg = base / 'xdg'
+            (xdg / 'git').mkdir(parents=True)
+            (xdg / 'git/attributes').write_text('* text=auto eol=lf\n')
+            (cr / 'src/f.txt').write_bytes(b'v1\r\n')
+            res = subprocess.run([sys.executable, str(scripts / 'source_state.py'), 'verify-source'],
+                                 env={**ss_env, 'XDG_CONFIG_HOME': str(xdg)}, capture_output=True, text=True)
+            (cr / 'src/f.txt').write_text('v1\n')
+            self.assertNotEqual(res.returncode, 0)
+
+            if os.geteuid() != 0:
+                opaque = cr / 'src/.git/opaque'
+                opaque.mkdir()
+                opaque.chmod(0o000)
+                try:
+                    res = subprocess.run([sys.executable, str(scripts / 'source_state.py'), 'verify-source'],
+                                         env=ss_env, capture_output=True, text=True)
+                    self.assertNotEqual(res.returncode, 0)
+                finally:
+                    opaque.chmod(0o755)
+
+        # 4. chromium-stable.yml: unknown completed stage result does not claim unverified-apk-*.
+        rv = ResultVerdict()
+        ok, summary = rv.verdict(prepare=('success', 'running'), part_01=('unknown', 'completed'))
+        self.assertFalse(ok)
+        self.assertNotIn('unverified-apk-*', summary)
+
 
 if __name__ == '__main__':
     unittest.main()
