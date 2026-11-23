@@ -58,11 +58,10 @@ decode_mount_path() {
 normalize_mount_path() {
   local __nm_out=$1 __nm_path=$2
   [[ "$__nm_path" == /* ]] || runner_fail "Mount check path must be absolute: $__nm_path"
-  while [[ "$__nm_path" != / && "$__nm_path" == */ ]]; do
-    __nm_path=${__nm_path%/}
-  done
+  [[ "$__nm_path" != *//* ]] || runner_fail "Mount check path must be canonical: $__nm_path"
+  [[ "$__nm_path" == / ]] || __nm_path=${__nm_path%/}
   case "$__nm_path" in
-    *//*|*/.|*/..|*/./*|*/../*)
+    */.|*/..|*/./*|*/../*)
       runner_fail "Mount check path must be canonical: $__nm_path"
       ;;
   esac
