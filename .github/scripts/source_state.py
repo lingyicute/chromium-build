@@ -107,11 +107,24 @@ def verify_source(root, lock):
         info_attrs = gitdir / 'info/attributes'
         if info_attrs.exists() or info_attrs.is_symlink():
             raise ValueError(f'{directory} uses local Git info/attributes')
+        worktree_cfg = gitdir / 'config.worktree'
+        if worktree_cfg.exists() or worktree_cfg.is_symlink():
+            raise ValueError(f'{directory} uses worktree Git config')
         git = ['/usr/bin/git', '--no-optional-locks', '--no-replace-objects',
                '-c', 'core.hooksPath=/dev/null',
+               '-c', 'core.attributesFile=/dev/null',
                '-c', 'core.fsmonitor=false', '-c', 'core.filemode=true',
                '-c', 'core.symlinks=true', '-c', 'core.autocrlf=false',
                '-c', 'core.ignorecase=false', '-C', str(repo)]
+        local_cfg = subprocess.check_output(
+            [*git, 'config', '--local', '--list', '--name-only', '-z'], env=git_env,
+        )
+        for cfg_key in local_cfg.split(b'\x00'):
+            if cfg_key and re.match(
+                rb'^(?:filter|diff|merge|include|includeif)\.|^(?:core\.attributesfile|extensions\.worktreeconfig)$',
+                cfg_key,
+            ):
+                raise ValueError(f'{directory} has unsafe driver configuration in .git/config')
         resolved_gitdir = str(gitdir.resolve())
         fields = subprocess.check_output(
             [*git, 'rev-parse', '--path-format=absolute',
@@ -120,12 +133,6 @@ def verify_source(root, lock):
         ).splitlines()
         if fields != [str(repo.resolve()), resolved_gitdir, resolved_gitdir, lock[field]]:
             raise ValueError(f'{directory} worktree or revision mismatch')
-        local_cfg = subprocess.check_output(
-            [*git, 'config', '--local', '--list', '--name-only', '-z'], env=git_env,
-        )
-        for cfg_key in local_cfg.split(b'\x00'):
-            if cfg_key and re.match(rb'^(?:filter|diff|merge)\.', cfg_key):
-                raise ValueError(f'{directory} has unsafe driver configuration in .git/config')
         # Reject assume-unchanged or skip-worktree index bits on non-gitlink files,
         # which would make git status silently ignore modified tracked files.
         indexed = subprocess.check_output([*git, 'ls-files', '-v', '-s', '-z'], env=git_env)
