@@ -221,7 +221,7 @@ def fetch_release_json(url=URL, timeout=90, attempts=FETCH_ATTEMPTS,
                 raise ValueError('Empty ChromiumDash response')
             return raw
         except urllib.error.HTTPError as exc:
-            retryable = exc.code in RETRYABLE_HTTP_CODES or exc.code >= 500
+            retryable = exc.code in RETRYABLE_HTTP_CODES or 500 <= exc.code < 600
             headers = getattr(exc, 'headers', None)
             try:
                 exc.close()
