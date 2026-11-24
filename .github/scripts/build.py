@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 """Supervise Ninja so only an orderly deadline stops and checkpoints the build."""
 import ctypes
+import io
 import json
+import math
 import os
 from pathlib import Path
 import re
@@ -45,20 +47,45 @@ def compute_budget(started, now, final_stage=False):
 
 def _read_stat(pid_dir):
     raw = (pid_dir / 'stat').read_text(encoding='utf-8', errors='replace')
-    # Fields after ") ": state ppid pgrp session ...
+    # Fields after ") ": state ppid pgrp session ... num_threads(17).
     fields = raw[raw.rindex(')') + 2:].split()
-    return fields[0], int(fields[1]), int(fields[3])
+    num_threads = int(fields[17]) if len(fields) > 17 and fields[17].isascii() and fields[17].isdigit() else 1
+    return fields[0], int(fields[1]), int(fields[3]), num_threads
+
+
+def _is_live_proc(pid_dir, state, num_threads):
+    if state not in DEAD_STATES:
+        return True
+    # A multithreaded tool whose leader called pthread_exit() reports 'Z' while workers still run.
+    if state != 'Z' or num_threads <= 1:
+        return False
+    try:
+        tids = os.listdir(pid_dir / 'task')
+    except OSError:
+        return False
+    for tid in tids:
+        if not (tid.isascii() and tid.isdigit()):
+            continue
+        try:
+            raw = (pid_dir / 'task' / tid / 'stat').read_text(encoding='utf-8', errors='replace')
+            tstate = raw[raw.rindex(')') + 2:].split()[0]
+            if tstate not in DEAD_STATES:
+                return True
+        except (OSError, ValueError, IndexError):
+            pass
+    return False
 
 
 def _iter_procs(proc_root='/proc'):
     for entry in os.listdir(proc_root):
         if not (entry.isascii() and entry.isdigit()):
             continue
+        pid_dir = Path(proc_root, entry)
         try:
-            state, ppid, sid = _read_stat(Path(proc_root, entry))
+            state, ppid, sid, num_threads = _read_stat(pid_dir)
         except (OSError, ValueError, IndexError):
             continue
-        yield int(entry), state, ppid, sid
+        yield int(entry), pid_dir, state, ppid, sid, num_threads
 
 
 def enable_orphan_tracking():
@@ -69,17 +96,17 @@ def enable_orphan_tracking():
         err = ctypes.get_errno()
         raise OSError(err, os.strerror(err))
     me = os.getpid()
-    return frozenset(pid for pid, _, ppid, _ in _iter_procs() if ppid == me)
+    return frozenset(pid for pid, _, _, ppid, _, _ in _iter_procs() if ppid == me)
 
 
 def _live_build_pids(session_id, protected_children=None, proc_root='/proc'):
     me = os.getpid()
     pids = []
-    for pid, state, ppid, sid in _iter_procs(proc_root):
-        if pid == me or state in DEAD_STATES:
+    for pid, pid_dir, state, ppid, sid, num_threads in _iter_procs(proc_root):
+        if pid == me:
             continue
         adopted = protected_children is not None and ppid == me and pid not in protected_children
-        if sid == session_id or adopted:
+        if (sid == session_id or adopted) and _is_live_proc(pid_dir, state, num_threads):
             pids.append(pid)
     return pids
 
@@ -102,9 +129,10 @@ def kill_session(session_id, timeout=CLEANUP_TIMEOUT_SECONDS, protected_children
             try:
                 fd = os.pidfd_open(pid)
                 try:
-                    state, ppid, sid = _read_stat(Path('/proc', str(pid)))
+                    pid_dir = Path('/proc', str(pid))
+                    state, ppid, sid, num_threads = _read_stat(pid_dir)
                     adopted = protected_children is not None and ppid == os.getpid() and pid not in protected_children
-                    if state not in DEAD_STATES and (sid == session_id or adopted):
+                    if (sid == session_id or adopted) and _is_live_proc(pid_dir, state, num_threads):
                         signal.pidfd_send_signal(fd, signal.SIGKILL)
                         killed.add(pid)
                 finally:
@@ -117,7 +145,7 @@ def kill_session(session_id, timeout=CLEANUP_TIMEOUT_SECONDS, protected_children
         time.sleep(0.05)
     if protected_children is not None:
         me = os.getpid()
-        for pid, _, ppid, _ in _iter_procs():
+        for pid, _, _, ppid, _, _ in _iter_procs():
             if pid != session_id and ppid == me and pid not in protected_children:
                 try:
                     os.waitpid(pid, os.WNOHANG)
@@ -147,17 +175,22 @@ def _wait_for(process, timeout, cancel_signal):
 
 
 def _is_alive(pid):
+    pid_dir = Path('/proc', str(pid))
     try:
-        state, _, _ = _read_stat(Path('/proc', str(pid)))
-        return state not in DEAD_STATES
+        state, _, _, num_threads = _read_stat(pid_dir)
+        return _is_live_proc(pid_dir, state, num_threads)
     except (OSError, ValueError, IndexError):
         return False
 
 
 def supervise(command, seconds, grace=STOP_GRACE_SECONDS, env=None,
               cancel_signal=None, protected_children=None):
-    if seconds <= 0 or grace < 0:
-        raise ValueError('seconds must be positive and grace non-negative')
+    if (isinstance(seconds, bool) or not isinstance(seconds, (int, float))
+            or not math.isfinite(seconds) or seconds <= 0):
+        raise ValueError('seconds must be a positive finite number')
+    if (isinstance(grace, bool) or not isinstance(grace, (int, float))
+            or not math.isfinite(grace) or grace < 0):
+        raise ValueError('grace must be a non-negative finite number')
     _check_cancelled(cancel_signal)
     proc = subprocess.Popen(command, start_new_session=True, env=env)
     signalled = False
@@ -303,8 +336,19 @@ def main():
         raise SystemExit('Missing executable Chromium Ninja inside build root')
 
     history = root / 'metadata/runners.jsonl'
-    if stage == '00' and history.exists() and history.stat().st_size > 0:
-        raise SystemExit('Stage 00 found pre-existing runners.jsonl history')
+    if history.is_symlink():
+        raise SystemExit('runners.jsonl must not be a symlink')
+    if history.exists():
+        if not history.is_file():
+            raise SystemExit('runners.jsonl must be a regular file')
+        hist_size = history.stat().st_size
+        if stage == '00' and hist_size > 0:
+            raise SystemExit('Stage 00 found pre-existing runners.jsonl history')
+        if hist_size > 0:
+            with history.open('rb') as f:
+                f.seek(-1, os.SEEK_END)
+                if f.read(1) != b'\n':
+                    raise SystemExit('Existing runners.jsonl is missing its trailing newline')
 
     jobs = compute_jobs()
     os.chdir(root / 'src')
@@ -352,6 +396,21 @@ def main():
     summarize(f'- Stage {stage}: `{status}` after compiling for {elapsed / 60:.1f} min '
               f'with -j{jobs}; setup took {setup / 60:.1f} min.', summary_path)
     summarize(f'- Stage {stage} resources: {usage}.', summary_path)
+    # A dead log tee leaves buffered output behind; suppress broken-pipe flush so
+    # Python finalization does not turn a completed stage into exit status 120.
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.flush()
+        except OSError:
+            try:
+                fd = stream.fileno()
+            except (OSError, ValueError, io.UnsupportedOperation):
+                continue
+            devnull = os.open(os.devnull, os.O_WRONLY)
+            try:
+                os.dup2(devnull, fd)
+            finally:
+                os.close(devnull)
 
 
 if __name__ == '__main__':
