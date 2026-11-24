@@ -854,6 +854,20 @@ class ResultVerdict(unittest.TestCase):
         self.assertIn('APK completed in `part-01`', summary)
         self.assertIn('| `part-02` | `skipped` | `-` |', summary)
 
+    def test_every_terminal_stage_requires_the_entire_valid_chain(self):
+        for idx, terminal in enumerate(self.ORDER):
+            jobs = {name: ('success', 'running') for name in self.ORDER[:idx]}
+            jobs[terminal] = ('success', 'completed')
+            with self.subTest(terminal=terminal):
+                ok, summary = self.verdict(**jobs)
+                self.assertTrue(ok, summary)
+                for name in self.ORDER:
+                    if name == terminal:
+                        continue
+                    invalid = dict(jobs, **{name: ('success', 'completed')})
+                    ok, summary = self.verdict(**invalid)
+                    self.assertFalse(ok, summary)
+
     def test_artifact_outputs_are_required_to_pass(self):
         ok, summary = self.verdict({'prepare': {'apk-id': ''}}, prepare=('success', 'completed'))
         self.assertFalse(ok)
