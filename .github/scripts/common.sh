@@ -5,6 +5,7 @@ set -Eeuo pipefail
 unset "${!GIT_@}" "${!ANDROID_@}" "${!DEPOT_TOOLS_@}" "${!VPYTHON_@}" "${!CIPD_@}" \
   JAVA_HOME GRADLE_HOME ANT_HOME JAVA_TOOL_OPTIONS _JAVA_OPTIONS JDK_JAVA_OPTIONS CLASSPATH \
   PYTHONPATH PYTHONHOME PYTHONSTARTUP PYTHONUSERBASE VIRTUAL_ENV CONDA_PREFIX \
+  PIP_CONFIG_FILE PIP_CACHE_DIR NPM_CONFIG_CACHE CARGO_HOME RUSTUP_HOME SSH_ASKPASS \
   CC CXX CFLAGS CXXFLAGS CPPFLAGS LDFLAGS CCACHE_DIR CCACHE_PREFIX NINJA_STATUS \
   CUSTOM_CIPD_CLIENT CHROMIUM_BUILDTOOLS_PATH GCLIENT_FILE LUCI_CONTEXT \
   GOOGLE_APPLICATION_CREDENTIALS BOTO_CONFIG BOTO_PATH NO_AUTH_BOTO_CONFIG \
@@ -45,6 +46,7 @@ fail() { echo "::error::$*" >&2; exit 1; }
 make_dirs_removable() {
   local root=${1:-} bad
   [[ -n "$root" && -d "$root" && ! -L "$root" ]] || fail "Expected a real directory: ${root:-<empty>}"
+  [[ "$root" == /* || "$root" == .* ]] || root="./$root"
   bad=$(find -P "$root" -type d ! -perm -u+rwx ! -exec chmod u+rwx -- {} \; -printf x -quit) \
     || fail "Could not traverse directories under $root"
   [[ -z "$bad" ]] || fail "Could not grant owner access under $root"

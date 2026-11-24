@@ -6,6 +6,8 @@ archive_relay_tree() (
   make_dirs_removable .
   # tar ignores sockets; delete leftover ones so --remove-files can rmdir directories.
   find . -mindepth 1 -type s -delete
+  set +f
+  shopt -u failglob
   shopt -s dotglob nullglob
   shopt -s globskipdots 2>/dev/null || true
   entries=(*)

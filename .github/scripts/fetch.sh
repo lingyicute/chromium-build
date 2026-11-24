@@ -76,7 +76,7 @@ buildtools/linux64/gn gen out/Release --fail-on-unused-args
 buildtools/linux64/gn args out/Release --list --short > "$CR_ROOT/metadata/effective-args.txt"
 
 # Drop transient download caches before compiling or checkpointing.
-if [[ -d "$CIPD_CACHE_DIR" ]]; then
+if [[ -d "$CIPD_CACHE_DIR" && ! -L "$CIPD_CACHE_DIR" ]]; then
   make_dirs_removable "$CIPD_CACHE_DIR"
   rm -rf -- "$CIPD_CACHE_DIR"
 fi
