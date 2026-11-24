@@ -238,6 +238,48 @@ class Checkpoint(unittest.TestCase):
     def consume(self, expected, **kwargs):
         return self.cli('restore-stream', str(self.root), env=dict(EXPECTED_SHA256=expected), **kwargs)
 
+    def test_short_reads_keep_the_manifest_and_chunk_boundaries(self):
+        import random
+        rng = random.Random(2026)
+
+        class ShortReader(io.BytesIO):
+            def readinto(self, view):
+                return super().readinto(view[:rng.randint(1, len(view))])
+
+        with tempfile.TemporaryDirectory() as tmp:
+            dest = Path(tmp)
+            for size in (1, 2, 3, 7, 16, 31, 64, 129, 1024):
+                for chunk_size in (1, 3, 8, 31, 128):
+                    payload = rng.randbytes(size)
+                    chunks = [payload[i:i + chunk_size] for i in range(0, size, chunk_size)]
+                    raw = ''.join(f'{hashlib.sha256(block).hexdigest()} {len(block)} {checkpoint.part_name(i)}\n'
+                                  for i, block in enumerate(chunks)).encode('ascii')
+                    sha, count, total = checkpoint.pack_stream(dest, ShortReader(payload), chunk_size)
+                    self.assertEqual((count, total), (len(chunks), size))
+                    self.assertEqual((dest / checkpoint.MANIFEST).read_bytes(), raw)
+                    self.assertEqual(sha, hashlib.sha256(raw).hexdigest())
+                    out = io.BytesIO()
+                    checkpoint.restore_stream(dest, sha, out)
+                    self.assertEqual(out.getvalue(), payload)
+                    self.assertEqual(list(dest.iterdir()), [])
+
+    def test_downstream_failure_keeps_current_part_and_closes_files(self):
+        class BrokenOutput(io.BytesIO):
+            def write(self, data):
+                raise OSError('downstream failed')
+
+        class BrokenFlush(io.BytesIO):
+            def flush(self):
+                raise OSError('downstream failed')
+
+        for output in (BrokenOutput(), BrokenFlush()):
+            with self.subTest(output=type(output).__name__):
+                before = set(Path('/proc/self/fd').iterdir())
+                with self.assertRaisesRegex(OSError, 'downstream failed'):
+                    checkpoint.restore_stream(self.root, self.expected, output)
+                self.assertEqual(set(Path('/proc/self/fd').iterdir()), before)
+                self.assertEqual(len(self.names()), 3)
+
     def test_cli_reports_throughput_to_job_summary(self):
         with tempfile.TemporaryDirectory() as tmp:
             summary = Path(tmp) / 'summary'
@@ -292,7 +334,7 @@ class Checkpoint(unittest.TestCase):
                 checkpoint.restore_stream(dest, sha, out)
             self.assertEqual(out.getvalue(), b'')
 
-    def test_part_hashed_ahead_is_checked_before_streaming(self):
+    def test_each_part_is_authenticated_before_streaming(self):
         with tempfile.TemporaryDirectory() as tmp:
             dest = Path(tmp)
             sha, _, _ = checkpoint.pack_stream(dest, io.BytesIO(b'aaaabbbbcccc'), chunk_size=4)
