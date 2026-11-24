@@ -1,8 +1,11 @@
 #!/usr/bin/env python3
 """Resolve Android Stable once via ChromiumDash and write the build lock."""
+from contextlib import suppress
 import datetime
+import email.utils
 import http.client
 import json
+import math
 import os
 from pathlib import Path
 import re
@@ -26,7 +29,8 @@ SHA1_PATTERN = re.compile(r'[0-9a-f]{40}')
 class _NoRedirectHandler(urllib.request.HTTPRedirectHandler):
     def redirect_request(self, req, fp, code, msg, headers, newurl):
         if fp is not None:
-            fp.close()
+            with suppress(Exception):
+                fp.close()
         raise ValueError(f'Unexpected ChromiumDash redirect ({code}): {newurl}')
 
 
@@ -59,25 +63,74 @@ def validate_run_metadata(repository, workflow_sha, run_id):
         raise ValueError('Invalid GITHUB_RUN_ID')
 
 
-def _get_header(headers, name):
+def _header_values(headers, name):
     if headers is None:
-        return None
+        return []
+    target = name.lower()
     if hasattr(headers, 'items'):
-        target = name.lower()
-        for k, v in headers.items():
-            if isinstance(k, str) and k.lower() == target:
-                return v
-        return None
-    return headers.get(name) if hasattr(headers, 'get') else None
+        return [v for k, v in headers.items() if isinstance(k, str) and k.lower() == target]
+    if hasattr(headers, 'get_all'):
+        return list(headers.get_all(name, []))
+    if isinstance(headers, (list, tuple)):
+        return [item[1] for item in headers
+                if isinstance(item, tuple) and len(item) == 2
+                and isinstance(item[0], str) and item[0].lower() == target]
+    if hasattr(headers, 'get'):
+        val = headers.get(name)
+        return [] if val is None else [val]
+    return []
 
 
-def _retry_delay(attempt, base_delay, headers=None):
+def _retry_delay(attempt, base_delay, headers=None, now=None):
     if base_delay <= 0:
         return 0.0
-    after = _get_header(headers, 'Retry-After')
-    if isinstance(after, str) and after.strip().isdigit():
-        return min(float(after.strip()), MAX_RETRY_AFTER_SECONDS)
-    return min(base_delay * (2.0 ** (attempt - 1)), MAX_RETRY_AFTER_SECONDS)
+    values = _header_values(headers, 'Retry-After')
+    after = values[0] if len(values) == 1 else None
+    if isinstance(after, str):
+        text = after.strip()
+        if text.isascii() and text.isdigit():
+            return min(float(text), MAX_RETRY_AFTER_SECONDS)
+        if text:
+            try:
+                target = email.utils.parsedate_to_datetime(text)
+            except (TypeError, ValueError, OverflowError):
+                target = None
+            if target is not None:
+                if target.tzinfo is None:
+                    target = target.replace(tzinfo=datetime.timezone.utc)
+                ref = datetime.datetime.now(datetime.timezone.utc) if now is None else now
+                if ref.tzinfo is None:
+                    ref = ref.replace(tzinfo=datetime.timezone.utc)
+                return max(0.0, min((target - ref).total_seconds(), MAX_RETRY_AFTER_SECONDS))
+    return min(base_delay * (2.0 ** min(attempt - 1, 60)), MAX_RETRY_AFTER_SECONDS)
+
+
+def _expected_content_length(headers):
+    for field in ('Content-Length', 'Transfer-Encoding', 'Content-Encoding'):
+        if len(_header_values(headers, field)) > 1:
+            raise ValueError(f'Multiple ChromiumDash {field} headers')
+    content_enc = (_header_values(headers, 'Content-Encoding') or [None])[0]
+    if content_enc is not None:
+        if not isinstance(content_enc, str) or content_enc.strip().lower() != 'identity':
+            raise ValueError('Unsupported ChromiumDash Content-Encoding')
+    transfer_enc = (_header_values(headers, 'Transfer-Encoding') or [None])[0]
+    raw_len = (_header_values(headers, 'Content-Length') or [None])[0]
+    if transfer_enc is not None:
+        if raw_len is not None:
+            raise ValueError('ChromiumDash returned both Content-Length and Transfer-Encoding')
+        if not isinstance(transfer_enc, str) or transfer_enc.strip().lower() != 'chunked':
+            raise ValueError('Unsupported ChromiumDash Transfer-Encoding')
+    if raw_len is None:
+        return None
+    if not isinstance(raw_len, str):
+        raise ValueError('Invalid ChromiumDash Content-Length')
+    text = raw_len.strip()
+    if not text.isascii() or not text.isdigit():
+        raise ValueError('Invalid ChromiumDash Content-Length')
+    size = int(text)
+    if size > MAX_BYTES:
+        raise ValueError('Oversized response')
+    return size
 
 
 def fetch_release_json(url=URL, timeout=90, attempts=FETCH_ATTEMPTS,
@@ -86,6 +139,14 @@ def fetch_release_json(url=URL, timeout=90, attempts=FETCH_ATTEMPTS,
     if (parsed.scheme != 'https' or not parsed.hostname or parsed.fragment
             or parsed.username is not None or parsed.password is not None):
         raise ValueError('ChromiumDash URL must use https with a bare hostname')
+    if isinstance(attempts, bool) or not isinstance(attempts, int) or attempts < 1:
+        raise ValueError('attempts must be a positive integer')
+    if (isinstance(timeout, bool) or not isinstance(timeout, (int, float))
+            or not math.isfinite(timeout) or timeout <= 0):
+        raise ValueError('timeout must be a positive finite number')
+    if (isinstance(retry_delay, bool) or not isinstance(retry_delay, (int, float))
+            or not math.isfinite(retry_delay) or retry_delay < 0):
+        raise ValueError('retry_delay must be a non-negative finite number')
     if opener is None:
         opener = urllib.request.build_opener(_NoRedirectHandler())
     req = urllib.request.Request(
@@ -100,28 +161,23 @@ def fetch_release_json(url=URL, timeout=90, attempts=FETCH_ATTEMPTS,
                     raise ValueError(f'Unexpected ChromiumDash HTTP status: {status}')
                 if resp.url != url:
                     raise ValueError('Unexpected ChromiumDash redirect')
-                headers = getattr(resp, 'headers', None)
-                raw_len = _get_header(headers, 'Content-Length')
-                expected_len = None
-                if raw_len is not None:
-                    text = str(raw_len).strip()
-                    if not text.isascii() or not text.isdigit():
-                        raise ValueError('Invalid ChromiumDash Content-Length')
-                    expected_len = int(text)
-                    if expected_len > MAX_BYTES:
-                        raise ValueError('Oversized response')
+                expected_len = _expected_content_length(getattr(resp, 'headers', None))
                 raw = resp.read(MAX_BYTES + 1)
             if len(raw) > MAX_BYTES:
                 raise ValueError('Oversized response')
-            if expected_len is not None and len(raw) != expected_len:
-                raise http.client.IncompleteRead(raw, max(expected_len - len(raw), 0))
+            if expected_len is not None:
+                if len(raw) < expected_len:
+                    raise http.client.IncompleteRead(raw, expected_len - len(raw))
+                if len(raw) > expected_len:
+                    raise ValueError('ChromiumDash response exceeded Content-Length')
             if not raw:
                 raise ValueError('Empty ChromiumDash response')
             return raw
         except urllib.error.HTTPError as exc:
             retryable = exc.code in RETRYABLE_HTTP_CODES or 500 <= exc.code < 600
             headers = getattr(exc, 'headers', None)
-            exc.close()
+            with suppress(Exception):
+                exc.close()
             if not retryable or attempt == attempts:
                 raise
             delay = _retry_delay(attempt, retry_delay, headers)
