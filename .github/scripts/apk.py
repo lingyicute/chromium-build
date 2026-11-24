@@ -1,220 +1,207 @@
 #!/usr/bin/env python3
-"""Stage and inspect the APK that will be uploaded by the workflow."""
+"""Stage, verify, and summarize the built ChromePublic.apk."""
 import json
 import os
 from pathlib import Path
 import re
+import shutil
 import stat
+import struct
 import subprocess
 import sys
 import tempfile
 import zipfile
 
+from resolve import VERSION_PATTERN
 
-from files import (open_regular_file as _open_regular_ro, read_bounded_bytes,
-                   write_regular_bytes as _write_regular_bytes)
-from resolve import VERSION_PATTERN, parse_release_json
+PACKAGE_NAME = 'org.chromium.chrome'
 PACKAGE_ATTR = r"[a-zA-Z][a-zA-Z0-9]*='[^']*'"
 
 
-def _read_lock_version(lock_path):
-    lock = parse_release_json(read_bounded_bytes(lock_path))
-    if not isinstance(lock, dict):
-        raise ValueError('Invalid build-lock.json')
-    version = lock.get('version')
-    if not isinstance(version, str) or not VERSION_PATTERN.fullmatch(version):
-        raise ValueError('Invalid version in build-lock.json')
-    return version
-
-
 def stage_apk(root, source, destination):
+    """Atomically snapshot source APK so an unverified fallback never sees a partial file."""
     if root.is_symlink() or not root.is_dir():
         raise ValueError('Build root must be a real directory')
-    # Do not follow a symlink (or block opening a FIFO) in place of the APK.
-    with _open_regular_ro(source) as src:
-        before = os.fstat(src.fileno())
-        if before.st_size <= 0:
-            raise ValueError('Expected a nonempty regular ChromePublic.apk')
-        opened_path = Path(f'/proc/self/fd/{src.fileno()}').resolve(strict=True)
-        if not opened_path.is_relative_to(root.resolve(strict=True)):
-            raise ValueError('ChromePublic.apk resolves outside the build tree')
-        # A diagnostic upload must not find a partial file if this step fails.
-        with tempfile.TemporaryDirectory(dir=destination.parent) as tmp:
-            candidate = Path(tmp) / destination.name
-            remaining = before.st_size
-            with candidate.open('xb') as dst:
-                # Do not chase EOF on a file that is concurrently being extended.
-                while remaining:
-                    block = src.read(min(remaining, 1024 * 1024))
-                    if not block:
-                        break
-                    dst.write(block)
-                    remaining -= len(block)
-            after = os.fstat(src.fileno())
-            if (remaining or after.st_size != before.st_size or after.st_nlink < 1
-                    or after.st_dev != before.st_dev or after.st_ino != before.st_ino
-                    or after.st_mtime_ns != before.st_mtime_ns or after.st_ctime_ns != before.st_ctime_ns):
-                raise ValueError('ChromePublic.apk changed while staging')
-            candidate.chmod(0o400)
-            candidate.replace(destination)
+    st = source.lstat()
+    if not stat.S_ISREG(st.st_mode) or st.st_size <= 0:
+        raise ValueError('Expected a non-empty regular ChromePublic.apk')
+    if not source.resolve(strict=True).is_relative_to(root.resolve(strict=True)):
+        raise ValueError('ChromePublic.apk resolves outside the build tree')
+    with tempfile.TemporaryDirectory(dir=destination.parent) as tmp:
+        candidate = Path(tmp) / destination.name
+        shutil.copyfile(source, candidate)
+        candidate.chmod(0o400)
+        candidate.replace(destination)
 
 
 def inspect_signer(log, pin):
-    expected = read_bounded_bytes(pin).decode('ascii').strip()
+    expected = pin.read_text(encoding='ascii').strip()
     if not re.fullmatch(r'[0-9a-f]{64}', expected):
         raise ValueError('Invalid development certificate SHA-256 pin')
-    trace = read_bounded_bytes(log).decode('utf-8')
-    count_lines = re.findall(r'^Number of signers:[^\r\n]*$', trace, re.M)
-    counts = re.findall(r'^Number of signers: ([0-9]+)[ \t]*\r?$', trace, re.M)
-    digest_lines = re.findall(r'^[^\r\n]*certificate SHA-256 digest:[^\r\n]*$', trace, re.M)
-    hashes = re.findall(r'^Signer #([1-9][0-9]*) certificate SHA-256 digest: ([0-9a-fA-F]{64})[ \t]*\r?$',
-                        trace, re.M)
-    other_signers = re.findall(r'^Signer #(?!1\b)\S+', trace, re.M)
-    source_stamp_lines = re.findall(r'^Verified for SourceStamp:[^\r\n]*$', trace, re.M)
-    source_stamp_false = re.findall(r'^Verified for SourceStamp:[ \t]*false[ \t]*\r?$', trace, re.M)
-    source_stamp = (len(source_stamp_lines) != len(source_stamp_false)
-                    or re.search(r'^Source ?Stamp Signer\b', trace, re.M) is not None)
-    explicit_error = re.search(r'^(?:DOES NOT VERIFY\b|ERROR:)', trace, re.M)
-    modern_scheme_lines = re.findall(r'^Verified using v(?:2|3(?:\.1)?) scheme\b[^\r\n]*$', trace, re.M)
-    modern_schemes = re.findall(r'^Verified using v(?:2|3(?:\.1)?) scheme \([^)\r\n]+\):[ \t]*(true|false)[ \t]*\r?$',
-                                trace, re.M)
-    if (len(count_lines) != 1 or counts != ['1'] or len(digest_lines) != 1 or len(hashes) != 1
-            or other_signers or source_stamp or explicit_error is not None
-            or len(modern_scheme_lines) != len(modern_schemes) or 'true' not in modern_schemes
-            or hashes[0][0] != '1' or hashes[0][1].lower() != expected):
+    trace = log.read_text(encoding='utf-8')
+    bad_error = re.search(r'^(?:DOES NOT VERIFY\b|ERROR:)', trace, re.M)
+    counts = re.findall(r'^Number of signers:[^\r\n]*$', trace, re.M)
+    digests = re.findall(r'^[^\r\n]*certificate SHA-256 digest:[^\r\n]*$', trace, re.M)
+    signer1 = re.findall(
+        r'^Signer #1 certificate SHA-256 digest: ([0-9a-fA-F]{64})[ \t]*\r?$', trace, re.M)
+    other_signers = re.search(r'^Signer #(?!1\b)\S+', trace, re.M)
+    stamp_lines = re.findall(r'^Verified for SourceStamp:[^\r\n]*$', trace, re.M)
+    bad_stamp = (any(not re.fullmatch(r'Verified for SourceStamp:[ \t]*false[ \t]*\r?', line) for line in stamp_lines)
+                 or re.search(r'^Source ?Stamp Signer\b', trace, re.M))
+    schemes = re.findall(r'^Verified using v(?:2|3(?:\.1)?) scheme\b[^\r\n]*$', trace, re.M)
+    scheme_vals = [
+        re.fullmatch(r'Verified using v(?:2|3(?:\.1)?) scheme \([^)\r\n]+\):[ \t]*(true|false)[ \t]*\r?', line)
+        for line in schemes
+    ]
+    if (bad_error or other_signers or bad_stamp
+            or len(counts) != 1 or not re.fullmatch(r'Number of signers: 1[ \t]*\r?', counts[0])
+            or len(digests) != 1 or len(signer1) != 1 or signer1[0].lower() != expected
+            or any(m is None for m in scheme_vals)
+            or not any(m[1] == 'true' for m in scheme_vals)):
         raise ValueError('APK does not have exactly the pinned Chromium development signer')
 
 
-def _validate_dex(zf, info):
-    with zf.open(info.filename) as dex:
-        header = dex.read(0x78)
-    file_size = int.from_bytes(header[32:36], 'little')
-    header_size = int.from_bytes(header[36:40], 'little')
-    if (not re.fullmatch(rb'dex\n[0-9]{3}\x00', header[:8]) or header_size not in (0x70, 0x78)
-            or len(header) < header_size or not header_size <= file_size <= info.file_size
-            or header[40:44] != b'\x78\x56\x34\x12'):
-        raise ValueError(f'APK root {info.filename} has an invalid or truncated DEX header')
-
-
 def inspect_zip(apk_path):
-    with _open_regular_ro(apk_path) as apk_file:
-        with zipfile.ZipFile(apk_file) as zf:
-            entries = zf.infolist()
-            names = {info.filename: info for info in entries}
-            if len(names) != len(entries) or any(info.filename != info.orig_filename for info in entries):
-                raise ValueError('APK contains duplicate or ambiguous ZIP entry names')
-            for name, info in names.items():
-                trimmed = name[:-1] if info.is_dir() else name
-                if (not trimmed or name.startswith('/') or '\\' in name
-                        or any(ord(ch) < 0x20 or ord(ch) == 0x7f for ch in name)
-                        or any(part in ('', '.', '..') for part in trimmed.split('/'))):
-                    raise ValueError(f'APK contains unsafe ZIP entry path: {name!r}')
-                mode_type = stat.S_IFMT(info.external_attr >> 16)
-                if mode_type not in (0, stat.S_IFDIR if info.is_dir() else stat.S_IFREG):
-                    raise ValueError(f'APK contains irregular ZIP entry mode: {name!r}')
-            for name in ('AndroidManifest.xml', 'classes.dex'):
-                if name not in names or names[name].is_dir() or names[name].file_size <= 0:
-                    raise ValueError(f'APK missing non-empty root {name}')
-            root_dex = [name for name in names if '/' not in name.rstrip('/') and name.rstrip('/').endswith('.dex')]
-            expected_dex = ['classes.dex', *(f'classes{i}.dex' for i in range(2, len(root_dex) + 1))]
-            if len(root_dex) != len(expected_dex) or set(root_dex) != set(expected_dex):
-                raise ValueError('APK root DEX files must form a contiguous classes*.dex sequence')
-            for dex_name in expected_dex:
-                if names[dex_name].is_dir() or names[dex_name].file_size <= 0:
-                    raise ValueError(f'APK root {dex_name} has an invalid or truncated DEX header')
-                _validate_dex(zf, names[dex_name])
+    with zipfile.ZipFile(apk_path) as zf:
+        entries = zf.infolist()
+        names = {info.filename: info for info in entries}
+        if len(names) != len(entries):
+            raise ValueError('APK contains duplicate ZIP entry names')
+        for name, info in names.items():
+            trimmed = name[:-1] if info.is_dir() else name
+            if (not trimmed or name.startswith('/') or '\\' in name
+                    or any(part in ('', '.', '..') for part in trimmed.split('/'))):
+                raise ValueError(f'APK contains unsafe ZIP entry path: {name!r}')
+        for required in ('AndroidManifest.xml', 'classes.dex'):
+            if required not in names or names[required].is_dir() or names[required].file_size <= 0:
+                raise ValueError(f'APK missing non-empty root {required}')
+        root_dex = [n for n in names if '/' not in n.rstrip('/') and n.rstrip('/').endswith('.dex')]
+        expected_dex = ['classes.dex', *(f'classes{i}.dex' for i in range(2, len(root_dex) + 1))]
+        if set(root_dex) != set(expected_dex):
+            raise ValueError('APK root DEX files must form a contiguous classes*.dex sequence')
+        for dex_name in expected_dex:
+            info = names[dex_name]
+            with zf.open(info) as dex:
+                hdr = dex.read(0x78)
+            if len(hdr) < 0x70 or not re.fullmatch(rb'dex\n[0-9]{3}\x00', hdr[:8]):
+                raise ValueError(f'APK root {dex_name} has an invalid DEX header')
+            file_size, hdr_size, endian = struct.unpack_from('<III', hdr, 32)
+            if hdr_size not in (0x70, 0x78) or len(hdr) < hdr_size or not hdr_size <= file_size <= info.file_size or endian != 0x12345678:
+                raise ValueError(f'APK root {dex_name} has a corrupt or truncated DEX header')
 
-            libs = []
-            for name in sorted(names):
-                if not name.startswith('lib/'):
-                    continue
-                info = names[name]
-                if info.is_dir():
-                    if name not in ('lib/', 'lib/arm64-v8a/'):
-                        raise ValueError(f'APK contains a native library directory outside arm64-v8a: {name!r}')
-                    continue
-                if not name.startswith('lib/arm64-v8a/'):
-                    raise ValueError(f'APK contains a native library outside arm64-v8a: {name!r}')
-                if not re.fullmatch(r'lib/arm64-v8a/[^/]+\.so', name):
-                    raise ValueError(f'APK missing valid arm64-v8a native library layout: {name!r}')
+        libs = []
+        for name in sorted(names):
+            if not name.startswith('lib/'):
+                continue
+            if names[name].is_dir():
+                if name not in ('lib/', 'lib/arm64-v8a/'):
+                    raise ValueError(f'APK contains native library dir outside arm64-v8a: {name!r}')
+            elif re.fullmatch(r'lib/arm64-v8a/[^/]+\.so', name):
                 libs.append(name)
-            if not libs:
-                raise ValueError('APK missing non-empty arm64-v8a native library')
-            for name in libs:
-                with zf.open(name) as lib:
-                    header = lib.read(64)
-                # Require a complete ELF64 little-endian ET_DYN header for EM_AARCH64.
-                if (len(header) != 64 or header[:7] != b'\x7fELF\x02\x01\x01'
-                        or header[16:24] != b'\x03\x00\xb7\x00\x01\x00\x00\x00' or header[52:54] != b'\x40\x00'):
-                    raise ValueError(f'APK has a truncated ELF header or a non-AArch64 shared object: {name!r}')
+            else:
+                raise ValueError(f'APK contains unexpected native library entry: {name!r}')
+        if not libs:
+            raise ValueError('APK missing arm64-v8a native library')
+        for name in libs:
+            with zf.open(name) as lib:
+                hdr = lib.read(64)
+            # ELF64 little-endian ET_DYN(3) for EM_AARCH64(183), version 1, ehsize 64.
+            if (len(hdr) != 64 or hdr[:7] != b'\x7fELF\x02\x01\x01'
+                    or struct.unpack_from('<HHI', hdr, 16) != (3, 183, 1)
+                    or struct.unpack_from('<H', hdr, 52)[0] != 64):
+                raise ValueError(f'APK has non-AArch64 or corrupt shared object: {name!r}')
 
 
 def inspect_badging(aapt2, apk_path, locked_version):
-    if not (aapt2.is_file() and os.access(aapt2, os.X_OK)):
-        raise ValueError('Chromium-managed Android build-tools aapt2 missing')
-    with _open_regular_ro(apk_path) as apk_file:
-        pass
-    badging = subprocess.check_output([str(aapt2), 'dump', 'badging', str(apk_path)],
-                                      text=True, encoding='utf-8')
-    package_lines = re.findall(r'^package:([^\r\n]*)\r?$', badging, re.M)
-    if len(package_lines) != 1:
-        raise ValueError('aapt2 output must contain exactly one package line')
-    if not re.fullmatch(rf'[ \t]*{PACKAGE_ATTR}(?:[ \t]+{PACKAGE_ATTR})*[ \t]*', package_lines[0]):
-        raise ValueError('aapt2 package line contains malformed attributes')
-    fields = re.findall(r"(?:^|[ \t]+)([a-zA-Z][a-zA-Z0-9]*)='([^']*)'", package_lines[0])
-    attrs = dict(fields)
-    if len(attrs) != len(fields):
+    badging = subprocess.check_output(
+        [str(aapt2), 'dump', 'badging', str(apk_path)], text=True, encoding='utf-8')
+    pkg_lines = re.findall(r'^package:([^\r\n]*)\r?$', badging, re.M)
+    if len(pkg_lines) != 1 or not re.fullmatch(rf'[ \t]*{PACKAGE_ATTR}(?:[ \t]+{PACKAGE_ATTR})*[ \t]*', pkg_lines[0]):
+        raise ValueError('aapt2 output missing valid package line')
+    pairs = re.findall(r"(?:^|[ \t]+)([a-zA-Z][a-zA-Z0-9]*)='([^']*)'", pkg_lines[0])
+    attrs = dict(pairs)
+    if len(attrs) != len(pairs):
         raise ValueError('aapt2 package line has duplicate fields')
-    expected_package = 'org.chromium.chrome'  # config/args.gn
-    if attrs.get('name') != expected_package:
-        raise ValueError(f'APK package name must be {expected_package}')
+    if attrs.get('name') != PACKAGE_NAME:
+        raise ValueError(f'APK package name must be {PACKAGE_NAME}')
     if attrs.get('versionName') != locked_version:
         raise ValueError(f"APK versionName mismatch: {attrs.get('versionName')!r} != {locked_version!r}")
     if not re.fullmatch(r'[1-9][0-9]*', attrs.get('versionCode', '')):
-        raise ValueError('APK missing a positive versionCode')
+        raise ValueError('APK missing positive versionCode')
     if re.search(r'^application-debuggable\b', badging, re.M):
         raise ValueError('APK must not be debuggable (android:debuggable=true)')
     if re.search(r'^(?:testOnly=|application-is-test-only\b)', badging, re.M):
         raise ValueError('APK must not be marked testOnly')
-    abi_lines = re.findall(r'^native-code:([^\r\n]*)\r?$', badging, re.M)
-    if not abi_lines:
-        raise ValueError('aapt2 output missing native-code line')
-    if (len(abi_lines) != 1 or not re.fullmatch(r"[ \t]*'arm64-v8a'[ \t]*", abi_lines[0])
-            or re.search(r'^alt-native-code:', badging, re.M)):
+    abis = re.findall(r'^native-code:([^\r\n]*)\r?$', badging, re.M)
+    if len(abis) != 1 or abis[0].strip() != "'arm64-v8a'" or re.search(r'^alt-native-code:', badging, re.M):
         raise ValueError('APK native-code must declare only arm64-v8a')
 
-    def _parse_sdk_field(tag):
-        raw_lines = re.findall(rf'^{tag}:([^\r\n]*)\r?$', badging, re.M)
-        if len(raw_lines) > 1:
-            raise ValueError('aapt2 output contains duplicate SDK version lines')
-        if not raw_lines:
-            return None
-        m = re.fullmatch(r"'([^'\r\n]+)'[ \t]*\r?", raw_lines[0])
-        if not m:
-            raise ValueError(f'aapt2 output has malformed {tag} line')
-        return m[1]
+    def sdk_field(tag):
+        hits = re.findall(rf"^{tag}:'([^'\r\n]+)'[ \t]*\r?$", badging, re.M)
+        return hits[0] if len(hits) == 1 else None
 
-    return dict(package=expected_package, version_code=attrs['versionCode'],
-                min_sdk=_parse_sdk_field('sdkVersion'),
-                target_sdk=_parse_sdk_field('targetSdkVersion'))
+    return {
+        'package': PACKAGE_NAME,
+        'version_code': attrs['versionCode'],
+        'min_sdk': sdk_field('sdkVersion'),
+        'target_sdk': sdk_field('targetSdkVersion'),
+    }
 
 
-def inspect_apk(apk_path, lock_path, aapt2, log, pin, metadata):
-    version = _read_lock_version(lock_path)
+def inspect_apk(apk_path, lock_path, aapt2, log, pin, meta_out):
+    lock = json.loads(lock_path.read_text(encoding='utf-8'))
+    version = lock.get('version') if isinstance(lock, dict) else None
+    if not isinstance(version, str) or not VERSION_PATTERN.fullmatch(version):
+        raise ValueError('Invalid version in build-lock.json')
     inspect_signer(log, pin)
     inspect_zip(apk_path)
     meta = inspect_badging(aapt2, apk_path, version)
-    _write_regular_bytes(metadata, (json.dumps(meta) + '\n').encode('utf-8'))
+    meta_out.write_text(json.dumps(meta) + '\n', encoding='utf-8')
+
+
+def write_summary(release, meta_path, summary_path):
+    try:
+        meta = json.loads(meta_path.read_text(encoding='utf-8'))
+        lock = json.loads((release / 'metadata/build-lock.json').read_text(encoding='utf-8'))
+        apk_path = release / 'Chromium-Stable-arm64.apk'
+        apk_sha = next(
+            line.split('  ', 1)[0]
+            for line in (release / 'SHA256SUMS').read_text(encoding='utf-8').splitlines()
+            if line.endswith('  Chromium-Stable-arm64.apk')
+        )
+        details = [f"{label} `{meta[key]}`" for key, label in (
+            ('version_code', 'versionCode'), ('min_sdk', 'minSdk'), ('target_sdk', 'targetSdk'))
+            if meta.get(key)]
+        lines = [
+            '### Built Chromium Android arm64 APK',
+            f"- Version: `{lock['version']}` (`{lock['chromium_revision'][:12]}`)",
+            f"- Package: `{meta['package']}`" + (f" ({', '.join(details)})" if details else ''),
+            f"- APK size: `{apk_path.stat().st_size:,}` bytes",
+            f'- APK SHA-256: `{apk_sha}`',
+        ]
+        runners = release / 'metadata/runners.jsonl'
+        if runners.is_file():
+            recs = [json.loads(line) for line in runners.read_text(encoding='utf-8').splitlines() if line.strip()]
+            if recs:
+                mins = sum(r.get('elapsed_seconds', 0) for r in recs if isinstance(r, dict)) / 60
+                lines.append(f'- Compile stages: `{len(recs)}` ({mins:.1f} min total compile)')
+        lines.append('- Signing: upstream development signing key; NOT production-signed.')
+        with summary_path.open('a', encoding='utf-8') as f:
+            f.write('\n'.join(lines) + '\n')
+    except Exception as exc:
+        print(f'::warning::Failed to append APK summary: {exc}', file=sys.stderr)
 
 
 def main():
     match sys.argv[1:]:
-        case ['stage', *paths] if len(paths) == 3:
-            stage_apk(*map(Path, paths))
-        case ['inspect', *paths] if len(paths) == 6:
-            inspect_apk(*map(Path, paths))
+        case ['stage', root, source, dest]:
+            stage_apk(Path(root), Path(source), Path(dest))
+        case ['inspect', apk_p, lock_p, aapt2, log, pin, meta]:
+            inspect_apk(Path(apk_p), Path(lock_p), Path(aapt2), Path(log), Path(pin), Path(meta))
+        case ['summary', release, meta, summary]:
+            write_summary(Path(release), Path(meta), Path(summary))
         case _:
-            raise SystemExit('Usage: apk.py stage ROOT SOURCE DEST | inspect APK LOCK AAPT2 SIGNATURE PIN META')
+            raise SystemExit('Usage: apk.py stage ROOT SRC DST | inspect APK LOCK AAPT2 LOG PIN META | summary DIR META SUMMARY')
 
 
 if __name__ == '__main__':
