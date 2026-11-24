@@ -423,6 +423,12 @@ class Deadline(unittest.TestCase):
     def test_success(self):
         self.assertEqual(self.run_command('pass'), 'completed')
 
+    def test_unsolicited_interrupted_exit_is_not_resumable(self):
+        for code in build.NINJA_INTERRUPTED:
+            with self.subTest(code=code):
+                status = build.supervise([sys.executable, '-c', f'raise SystemExit({code})'], 2, grace=0.1)
+                self.assertEqual(status, f'failed:{code}')
+
     def test_compile_error(self):
         self.assertEqual(self.run_command('raise SystemExit(1)'), 'failed:1')
 

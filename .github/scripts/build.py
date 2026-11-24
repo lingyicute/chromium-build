@@ -218,16 +218,14 @@ def supervise(command, seconds, grace=STOP_GRACE_SECONDS, env=None, cancel_signa
     # start_new_session: ninja becomes session leader, so session id == p.pid.
     p = subprocess.Popen(command, start_new_session=True, env=env)
     try:
+        signalled = False
         try:
             rc = wait_for_ninja(p, seconds, cancel_signal)
-            result = 'completed' if rc == 0 else f'failed:{rc}'
         except subprocess.TimeoutExpired:
             # Races where ninja already failed must not be disguised as timeout.
             check_cancelled(cancel_signal)
             rc = p.poll()
-            if rc is not None:
-                result = 'completed' if rc == 0 else f'failed:{rc}'
-            else:
+            if rc is None:
                 proc_dir = Path('/proc', str(p.pid))
                 try:
                     already_dead = not _is_live_proc(proc_dir, _proc_fields(proc_dir))
@@ -243,22 +241,18 @@ def supervise(command, seconds, grace=STOP_GRACE_SECONDS, env=None, cancel_signa
                 try:
                     rc = wait_for_ninja(p, grace if signalled else min(grace, 1), cancel_signal)
                 except subprocess.TimeoutExpired:
-                    result = 'failed:shutdown-timeout'
-                else:
-                    if rc == 0:
-                        result = 'completed'
-                    elif signalled and rc in NINJA_INTERRUPTED:
-                        result = 'running'
-                        # Ninja reaps only its direct children. Descendants of the edges it
-                        # interrupted got the same SIGINT; let them finish exiting within the
-                        # rest of the stop grace so that only real stragglers need SIGKILL.
-                        while (_live_session_pids(p.pid, protected_children=protected_children)
-                               and monotonic_now() < stop_deadline):
-                            check_cancelled(cancel_signal)
-                            time.sleep(0.05)
-                    else:
-                        # Signal death is not Ninja acknowledging edge cleanup.
-                        result = f'failed:{rc}'
+                    rc = 'shutdown-timeout'
+                if signalled and rc in NINJA_INTERRUPTED:
+                    # Interrupted descendants share Ninja's remaining stop grace.
+                    while (_live_session_pids(p.pid, protected_children=protected_children)
+                           and monotonic_now() < stop_deadline):
+                        check_cancelled(cancel_signal)
+                        time.sleep(0.05)
+        # Only OUR signal followed by Ninja's acknowledgement permits a resume.
+        if signalled and rc in NINJA_INTERRUPTED:
+            result = 'running'
+        else:
+            result = 'completed' if rc == 0 else f'failed:{rc}'
     finally:
         p.poll()
         forced, lingering = kill_session(p.pid, protected_children=protected_children)
