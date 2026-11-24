@@ -69,41 +69,19 @@ retry() {
   (( $# > 0 )) || fail 'retry requires a command'
   local delay="${CR_RETRY_DELAY:-30}"
   { [[ "$delay" =~ ^[0-9]{1,4}$ ]] && (( 10#$delay <= 3600 )); } || fail "Invalid CR_RETRY_DELAY: $delay"
-  local attempt rc wait_s sleep_pid=0 interrupted=0 prev_int prev_term
+  local attempt rc=1 wait_s sleep_pid=0 interrupted=0 prev_int prev_term
   prev_int=$(trap -p INT)
   prev_term=$(trap -p TERM)
   trap 'interrupted=130; (( sleep_pid == 0 )) || kill "$sleep_pid" 2>/dev/null || true' INT
   trap 'interrupted=143; (( sleep_pid == 0 )) || kill "$sleep_pid" 2>/dev/null || true' TERM
   for attempt in 1 2 3; do
-    if (( interrupted != 0 )); then
-      eval "${prev_int:-trap - INT}"
-      eval "${prev_term:-trap - TERM}"
-      echo "::error::Interrupted (exit $interrupted), aborting without retry: $*" >&2
-      exit "$interrupted"
-    fi
+    (( interrupted == 0 )) || break
     rc=0
     "$@" || rc=$?
-    if (( interrupted != 0 )); then
-      rc=$interrupted
-    elif (( rc == 0 )); then
-      eval "${prev_int:-trap - INT}"
-      eval "${prev_term:-trap - TERM}"
-      return 0
-    fi
-    if (( rc == 130 || rc == 143 )); then
-      eval "${prev_int:-trap - INT}"
-      eval "${prev_term:-trap - TERM}"
-      echo "::error::Interrupted (exit $rc), aborting without retry: $*" >&2
-      exit "$rc"
-    fi
-    if (( attempt >= 3 )); then
-      eval "${prev_int:-trap - INT}"
-      eval "${prev_term:-trap - TERM}"
-      fail "Failed after 3 attempts: $* (exit $rc)"
-    fi
-    if (( interrupted == 0 )); then
-      echo "::warning::Attempt $attempt failed (exit $rc), retrying: $*" >&2
-    fi
+    (( interrupted == 0 )) || rc=$interrupted
+    # All terminal outcomes share the same trap restoration below.
+    (( rc != 0 && rc != 130 && rc != 143 && attempt < 3 )) || break
+    echo "::warning::Attempt $attempt failed (exit $rc), retrying: $*" >&2
     wait_s=$(( attempt * 10#$delay ))
     rc=0
     if (( wait_s > 0 && interrupted == 0 )); then
@@ -116,12 +94,14 @@ retry() {
       wait "$sleep_pid" 2>/dev/null || true
       sleep_pid=0
     fi
-    (( interrupted == 0 )) || rc=$interrupted
-    if (( rc == 130 || rc == 143 )); then
-      eval "${prev_int:-trap - INT}"
-      eval "${prev_term:-trap - TERM}"
-      echo "::error::Interrupted (exit $rc), aborting without retry: $*" >&2
-      exit "$rc"
-    fi
+    (( rc != 130 && rc != 143 )) || break
   done
+  eval "${prev_int:-trap - INT}"
+  eval "${prev_term:-trap - TERM}"
+  (( interrupted == 0 )) || rc=$interrupted
+  if (( rc == 130 || rc == 143 )); then
+    echo "::error::Interrupted (exit $rc), aborting without retry: $*" >&2
+    exit "$rc"
+  fi
+  (( rc == 0 )) || fail "Failed after 3 attempts: $* (exit $rc)"
 }

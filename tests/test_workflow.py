@@ -587,6 +587,15 @@ class Retry(unittest.TestCase):
         self.assertEqual(p.stdout.strip(), 'attempts=3')
         self.assertEqual(p.stderr.count('::warning::'), 2)
 
+    def test_restores_callers_signal_traps_after_success(self):
+        for command in ('true', 'flaky'):
+            with self.subTest(command=command):
+                p = self.run_retry(
+                    "trap 'echo caller-int' INT; trap 'echo caller-term' TERM; "
+                    'before=$(trap -p); n=0; flaky() { n=$((n + 1)); (( n == 3 )); }; '
+                    f'retry {command}; [[ "$(trap -p)" == "$before" ]]')
+                self.assertEqual(p.returncode, 0, p.stderr)
+
     def test_gives_up_after_three_attempts(self):
         p = self.run_retry('broken() { echo try; return 1; }; retry broken; echo unreachable')
         self.assertEqual(p.returncode, 1)
