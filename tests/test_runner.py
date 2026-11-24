@@ -70,6 +70,8 @@ class RunnerGuards(unittest.TestCase):
             base + '3 2 8:2 /s /mnt/bad\\c rw - ext4 /dev/sdb rw\n',
             base + '3 2 8:2 /s /mnt/no-separator rw\n',
             base + '3 2 8:2 /s /mnt/test\\040relay rw - ext4 /dev/sdb rw',
+            base + '3 2 8:2 /s /mnt/x - ext4 /dev/sdb rw\n',
+            base + '3 2 8:2 /s /mnt/x rw - ext4\n',
         ):
             r = subprocess.run(['bash', '-euc', cmd, '_', str(SCRIPTS), '/mnt/test relay'],
                                input=bad, capture_output=True, text=True, timeout=5)
@@ -86,6 +88,12 @@ class RunnerGuards(unittest.TestCase):
                                input=mount, capture_output=True, text=True, timeout=5)
             self.assertNotEqual(r.returncode, 0)
             self.assertIn('Refusing mount at or below', r.stderr)
+
+        # Octal-escaped multi-byte UTF-8 mount paths decode as raw bytes.
+        utf8_mount = (base + '3 2 8:2 /s /mnt/caf\\303\\251 rw - ext4 /dev/sdb rw\n').encode('ascii')
+        r = subprocess.run(['bash', '-euc', cmd, '_', str(SCRIPTS), '/mnt/caf\u00e9'],
+                           input=utf8_mount, capture_output=True, timeout=5)
+        self.assertNotEqual(r.returncode, 0)
 
         # Non-canonical target paths rejected; valid ones accepted.
         for bad_path in ('/mnt//relay', '/mnt/relay/.', '/mnt/relay/..', '/mnt/./relay', '/mnt/../relay', '/.'):
@@ -124,3 +132,14 @@ class RunnerGuards(unittest.TestCase):
 
             r = self.run_guard('source "$1/common.sh"; make_dirs_removable', target, RUNNER_TEMP=tmp)
             self.assertNotEqual(r.returncode, 0)
+
+            dash = Path(tmp) / '-dash'
+            dash.mkdir()
+            dash.chmod(0o555)
+            r = subprocess.run(
+                ['bash', '-euc', 'source "$1/runner.sh"; require_empty_directory -dash; '
+                 'source "$1/common.sh"; make_dirs_removable -dash', '_', str(SCRIPTS)],
+                cwd=tmp, env={**os.environ, 'RUNNER_TEMP': tmp}, capture_output=True, text=True, timeout=5,
+            )
+            self.assertEqual(r.returncode, 0, r.stderr)
+            self.assertEqual(dash.stat().st_mode & 0o700, 0o700)

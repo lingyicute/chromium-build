@@ -642,5 +642,148 @@ class ResultVerdict(unittest.TestCase):
         self.assertFalse(ok)
 
 
+
+class SimplifiedReviewRegressions(unittest.TestCase):
+    def test_resolve_retry_after_http_date_close_error_and_encoding(self):
+        import datetime
+        now = datetime.datetime(2026, 11, 24, 12, 0, 0, tzinfo=datetime.timezone.utc)
+        self.assertEqual(resolve._retry_delay(1, 2.0, {'Retry-After': 'Tue, 24 Nov 2026 12:00:25 GMT'}, now=now), 25.0)
+        self.assertEqual(resolve._retry_delay(1, 2.0, {'Retry-After': 'Tue, 24 Nov 2026 11:59:00 GMT'}, now=now), 0.0)
+        self.assertEqual(resolve._retry_delay(1, 2.0, [('Retry-After', '11')]), 11.0)
+        self.assertEqual(resolve._retry_delay(1, 2.0, {'Retry-After': '\u00b2'}), 2.0)
+        self.assertEqual(resolve._retry_delay(2000, 2.0), resolve.MAX_RETRY_AFTER_SECONDS)
+
+        class _BrokenCloseError(urllib.error.HTTPError):
+            def close(self):
+                raise OSError('close failed')
+
+        payload = b'[{"channel":"Stable","platform":"Android","version":"1.2.3.4","hashes":{"chromium":"' + b'a' * 40 + b'"}}]'
+        err = _BrokenCloseError(resolve.URL, 503, 'Busy', {'Retry-After': '0'}, None)
+        opener = _FakeOpener([err, _FakeResponse(payload)])
+        self.assertEqual(resolve.fetch_release_json(retry_delay=0, opener=opener), payload)
+
+        for headers, pattern in (
+            ({'Content-Encoding': 'gzip'}, 'Content-Encoding'),
+            ({'Content-Length': '5', 'Transfer-Encoding': 'chunked'}, 'both Content-Length'),
+            ([('Content-Length', '5'), ('Content-Length', '5')], 'Multiple.*Content-Length'),
+            ({'Content-Length': '2'}, 'exceeded Content-Length'),
+        ):
+            with self.subTest(headers=headers):
+                with self.assertRaisesRegex(ValueError, pattern):
+                    resolve.fetch_release_json(retry_delay=0, opener=_FakeOpener([_FakeResponse(b'hello', headers=headers)]))
+
+    def test_checkpoint_short_writer_chunk_type_and_cleanup_oserror(self):
+        class _ShortWriter:
+            def __init__(self):
+                self.buf = bytearray()
+            def write(self, data):
+                chunk = bytes(data[:2])
+                self.buf.extend(chunk)
+                return len(chunk)
+            def flush(self):
+                pass
+
+        with tempfile.TemporaryDirectory() as tmp:
+            d = Path(tmp)
+            for bad in (True, 0, 1.5):
+                with self.assertRaises(ValueError):
+                    checkpoint.pack_stream(d, io.BytesIO(b'abc'), chunk_size=bad)
+            sha, count, total = checkpoint.pack_stream(d, io.BytesIO(b'abcdefghij'), chunk_size=4)
+            self.assertEqual((count, total), (3, 10))
+            out = _ShortWriter()
+            self.assertEqual(checkpoint.restore_stream(d, sha, out), (3, 10))
+            self.assertEqual(bytes(out.buf), b'abcdefghij')
+
+            # Simulate an OSError during unlink cleanup after stream failure.
+            class _FailLater:
+                def __init__(self):
+                    self.calls = 0
+                def read(self, n):
+                    self.calls += 1
+                    if self.calls == 1:
+                        return b'abcd'
+                    raise RuntimeError('upstream died')
+
+            real_unlink = Path.unlink
+            def flaky_unlink(self_path, missing_ok=False):
+                if self_path.name == 'tree.part-00000':
+                    raise PermissionError('locked')
+                return real_unlink(self_path, missing_ok=missing_ok)
+
+            from unittest import mock
+            with mock.patch.object(Path, 'unlink', flaky_unlink):
+                with self.assertRaisesRegex(RuntimeError, 'upstream died'):
+                    checkpoint.pack_stream(d, _FailLater(), chunk_size=4)
+
+    def test_build_multithreaded_zombie_history_newline_and_dead_tee(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            proc = Path(tmp) / 'proc'
+            leader = proc / '123'
+            (leader / 'task' / '123').mkdir(parents=True)
+            (leader / 'task' / '124').mkdir(parents=True)
+            fields = ['Z', '1', '555', '555'] + ['0'] * 13 + ['2']
+            (leader / 'stat').write_text('123 (java) ' + ' '.join(fields) + '\n')
+            (leader / 'task/123/stat').write_text('123 (java) Z 1 555 555\n')
+            (leader / 'task/124/stat').write_text('124 (worker) S 1 555 555\n')
+            self.assertEqual(build._live_build_pids(555, proc_root=str(proc)), [123])
+            (leader / 'task/124/stat').write_text('124 (worker) Z 1 555 555\n')
+            self.assertEqual(build._live_build_pids(555, proc_root=str(proc)), [])
+
+            # Existing unterminated runners.jsonl must fail before compiling.
+            root = Path(tmp) / 'cr'
+            (root / 'src/third_party/ninja').mkdir(parents=True)
+            ninja = root / 'src/third_party/ninja/ninja'
+            ninja.write_text('#!/bin/sh\nexit 0\n')
+            ninja.chmod(0o755)
+            (root / 'metadata').mkdir()
+            (root / 'metadata/runners.jsonl').write_text('{"stage":"00"}')
+            temp = Path(tmp) / 'rt'
+            temp.mkdir()
+            (temp / 'chromium-job-start').write_text(f'{int(build.monotonic_now())}\n')
+            out = temp / 'out'
+            env = dict(os.environ, CR_ROOT=str(root), RUNNER_TEMP=str(temp), STAGE='01',
+                       GITHUB_RUN_ATTEMPT='1', GITHUB_OUTPUT=str(out), GITHUB_STEP_SUMMARY='')
+            res = subprocess.run([sys.executable, str(SCRIPTS / 'build.py')], env=env, capture_output=True, text=True)
+            self.assertNotEqual(res.returncode, 0)
+            self.assertIn('trailing newline', res.stderr)
+
+            # Dead tee must not turn a completed stage into Python exit status 120.
+            (root / 'metadata/runners.jsonl').unlink()
+            cmd = (
+                'exec "$1" "$2" > >(head -n 1 >/dev/null) 2>&1'
+            )
+            env0 = dict(env, STAGE='00')
+            res = subprocess.run(['bash', '-c', cmd, '_', sys.executable, str(SCRIPTS / 'build.py')],
+                                 env=env0, capture_output=True, text=True, timeout=10)
+            self.assertEqual(res.returncode, 0, res.stderr)
+            self.assertEqual(out.read_text().strip(), 'status=completed')
+
+    def test_apk_zip_nul_and_summary_null_elapsed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            d = Path(tmp)
+            rel = d / 'release'
+            (rel / 'metadata').mkdir(parents=True)
+            (rel / 'Chromium-Stable-arm64.apk').write_bytes(b'apk')
+            (rel / 'SHA256SUMS').write_text('deadbeef  metadata/x  Chromium-Stable-arm64.apk\n'
+                                           + 'a' * 64 + '  Chromium-Stable-arm64.apk\n')
+            (rel / 'metadata/build-lock.json').write_text(json.dumps({'version': '1.0.0.0', 'chromium_revision': 'b' * 40}))
+            (rel / 'metadata/runners.jsonl').write_text(json.dumps({'stage': '00', 'elapsed_seconds': None}) + '\n')
+            meta = d / 'meta.json'
+            meta.write_text(json.dumps({'package': 'org.chromium.chrome', 'version_code': '1', 'min_sdk': '29`x', 'target_sdk': '36'}))
+            summary = d / 'summary.md'
+            apk.write_summary(rel, meta, summary)
+            text = summary.read_text()
+            self.assertIn('a' * 64, text)
+            self.assertIn('0.0 min total compile', text)
+            self.assertNotIn('29`x', text)
+
+            bad_apk = d / 'nul.apk'
+            with zipfile.ZipFile(bad_apk, 'w') as zf:
+                zf.writestr('AndroidManifest.xml', b'm')
+                zf.writestr('classes.dexXextra', b'x')
+            bad_apk.write_bytes(bad_apk.read_bytes().replace(b'classes.dexXextra', b'classes.dex\x00extra'))
+            with self.assertRaisesRegex(ValueError, 'ambiguous ZIP'):
+                apk.inspect_zip(bad_apk)
+
 if __name__ == '__main__':
     unittest.main()

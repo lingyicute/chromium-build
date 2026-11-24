@@ -114,5 +114,23 @@ class ReleaseScript(unittest.TestCase):
         self.assertTrue((self.tmp / 'chromium-release/Chromium-Stable-arm64.apk').is_file())
 
 
+    def test_unsafe_metadata_filename_is_rejected(self):
+        self.build_tools('36.0.0', aapt2=True)
+        (self.root / 'metadata/bad:name.txt').write_text('x')
+        p = self.release()
+        self.assertNotEqual(p.returncode, 0)
+        self.assertIn('unsafe', p.stderr)
+
+    def test_build_tools_scan_failure_is_not_masked(self):
+        self.build_tools('36.0.0', aapt2=True)
+        (self.tmp / 'sort').write_text('#!/bin/sh\nexit 2\n')
+        (self.tmp / 'sort').chmod(0o755)
+        wrapper = self.tmp / '.github/scripts/common.sh'
+        wrapper.write_text(wrapper.read_text() + 'export PATH="$RUNNER_TEMP:$PATH"\n')
+        p = self.release()
+        self.assertNotEqual(p.returncode, 0)
+        self.assertIn('Failed to scan', p.stderr)
+
+
 if __name__ == '__main__':
     unittest.main()
