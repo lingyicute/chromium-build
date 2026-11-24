@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Stream-split a checkpoint into hashed parts and verify each part before restoring."""
+from contextlib import suppress
 import hashlib
 import hmac
 import os
@@ -126,8 +127,18 @@ def digest(directory):
     return expected
 
 
+def _write_all(stream, data):
+    view = memoryview(data)
+    written = 0
+    while written < len(view):
+        n = stream.write(view[written:])
+        if n is None or not 0 < n <= len(view) - written:
+            raise OSError('Short write to checkpoint stream')
+        written += n
+
+
 def pack_stream(directory, in_stream, chunk_size=CHUNK_SIZE):
-    if not 1 <= chunk_size <= CHUNK_SIZE:
+    if isinstance(chunk_size, bool) or not isinstance(chunk_size, int) or not 1 <= chunk_size <= CHUNK_SIZE:
         raise ValueError(f'chunk_size must be between 1 and {CHUNK_SIZE} bytes')
     dest = _require_dir(directory, 'Checkpoint output directory does not exist')
     if any(dest.iterdir()):
@@ -163,7 +174,8 @@ def pack_stream(directory, in_stream, chunk_size=CHUNK_SIZE):
             out.write(data)
     except BaseException:
         for path in created:
-            path.unlink(missing_ok=True)
+            with suppress(OSError):
+                path.unlink(missing_ok=True)
         raise
     return hashlib.sha256(data).hexdigest(), len(lines), total_bytes
 
@@ -175,7 +187,7 @@ def restore_stream(directory, expected, out_stream):
         with _open_verified(path, sha, size) as f:
             sent = 0
             while chunk := f.read(IO_BUFFER):
-                out_stream.write(chunk)
+                _write_all(out_stream, chunk)
                 sent += len(chunk)
             if sent != size:
                 raise ValueError(MISMATCH)
