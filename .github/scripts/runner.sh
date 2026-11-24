@@ -1,138 +1,102 @@
 #!/usr/bin/env bash
-# Sourced by the scripts that prepare or write the local relay disk.
+# Shared runner and filesystem layout guards.
 runner_fail() { printf '::error::%s\n' "$*" >&2; exit 1; }
 
 require_hosted_runner() {
   [[ "${RUNNER_ENVIRONMENT:-}" == github-hosted ]] || runner_fail 'GitHub-hosted runner required'
 }
 
-# Hosted runners come with either a separate /mnt disk or one larger OS disk that
-# also holds /mnt. Both are accepted: host.sh checks the space that is really free.
+# Accept both separate /mnt disk and single-disk hosted runners; host.sh checks free space.
 require_relay_mount() {
-  local root_device
+  local root_dev
   [[ -d /mnt && ! -L /mnt ]] || runner_fail '/mnt must be a real directory'
-  root_device=$(stat -c '%d' -- /) || runner_fail 'Cannot inspect root filesystem'
+  root_dev=$(stat -c '%d' -- /) || runner_fail 'Cannot inspect root filesystem'
   relay_device=$(stat -c '%d' -- /mnt) || runner_fail 'Cannot inspect /mnt filesystem'
-  [[ -n "$root_device" && -n "$relay_device" ]] || runner_fail 'Cannot inspect /mnt filesystem'
+  [[ -n "$root_dev" && -n "$relay_device" ]] || runner_fail 'Cannot inspect /mnt filesystem'
   relay_shares_root=0
-  [[ "$relay_device" != "$root_device" ]] || relay_shares_root=1
+  [[ "$relay_device" != "$root_dev" ]] || relay_shares_root=1
 }
 
 require_relay_directory() {
-  local dir=$1 device
+  local dir=$1 dev
   [[ -n "${relay_device:-}" ]] || runner_fail 'Relay filesystem check has not run'
   [[ -d "$dir" && ! -L "$dir" ]] || runner_fail "Refusing non-directory or symlink: $dir"
-  device=$(stat -c '%d' -- "$dir") || runner_fail "Cannot inspect filesystem for $dir"
-  [[ "$device" == "$relay_device" ]] || runner_fail "Expected $dir on the /mnt filesystem"
+  dev=$(stat -c '%d' -- "$dir") || runner_fail "Cannot inspect filesystem for $dir"
+  [[ "$dev" == "$relay_device" ]] || runner_fail "Expected $dir on the /mnt filesystem"
 }
 
 require_empty_directory() {
-  local dir=${1:-} entry
+  local dir=${1:-} found
   [[ -n "$dir" && -d "$dir" && ! -L "$dir" ]] || runner_fail "Refusing non-directory or symlink: $dir"
-  [[ "$dir" == /* || "$dir" == . || "$dir" == ./* || "$dir" == .. || "$dir" == ../* ]] \
-    || dir="./$dir"
-  # Print a marker rather than capturing filenames (which can be only newlines).
-  entry=$(find -P "$dir" -mindepth 1 -maxdepth 1 -printf 'present' -quit) \
+  found=$(find -P "$dir" -mindepth 1 -maxdepth 1 -printf x -quit) \
     || runner_fail "Cannot inspect contents of $dir"
-  [[ -z "$entry" ]] || runner_fail "Expected an empty directory: $dir"
+  [[ -z "$found" ]] || runner_fail "Expected an empty directory: $dir"
 }
 
-# Linux mangle_path() emits fixed 3-digit octal escapes (\040, \011, \012, \134).
-# Decode in one pass so a following digit (e.g. \0401) is not folded into \0NNN.
-decode_mount_path() {
-  local __dm_out=$1 __dm_rest=$2 __dm_acc='' __dm_prefix __dm_esc __dm_ch
-  while [[ "$__dm_rest" == *\\* ]]; do
-    __dm_prefix=${__dm_rest%%\\*}
-    __dm_rest=${__dm_rest#*\\}
-    [[ ${#__dm_rest} -ge 3 && "${__dm_rest:0:3}" =~ ^[0-3][0-7]{2}$ && "${__dm_rest:0:3}" != 000 ]] \
-      || runner_fail 'Malformed runner mount table'
-    __dm_esc=${__dm_rest:0:3}
-    __dm_rest=${__dm_rest:3}
-    printf -v __dm_ch '\\0%s' "$__dm_esc"
-    printf -v __dm_ch '%b' "$__dm_ch"
-    __dm_acc+="${__dm_prefix}${__dm_ch}"
-  done
-  printf -v "$__dm_out" '%s' "${__dm_acc}${__dm_rest}"
-}
-
-normalize_mount_path() {
-  local __nm_out=$1 __nm_path=$2
-  [[ "$__nm_path" == /* ]] || runner_fail "Mount check path must be absolute: $__nm_path"
-  [[ "$__nm_path" != *//* ]] || runner_fail "Mount check path must be canonical: $__nm_path"
-  [[ "$__nm_path" == / ]] || __nm_path=${__nm_path%/}
-  case "$__nm_path" in
-    */.|*/..|*/./*|*/../*)
-      runner_fail "Mount check path must be canonical: $__nm_path"
-      ;;
-  esac
-  printf -v "$__nm_out" '%s' "$__nm_path"
-}
-
-# Command substitution strips trailing newlines; preserve them via a sentinel.
-realpath_exact() {
-  local __rp_out=$1 __rp_raw
-  __rp_raw=$(realpath -e -- "$2" && printf x) || return 1
-  printf -v "$__rp_out" '%s' "${__rp_raw%$'\n'x}"
-}
-
-# Resolve symlinked ancestor directories without dereferencing the leaf itself,
-# matching the canonical paths recorded in /proc/self/mountinfo.
-resolve_mount_parent() {
-  local __rm_out=$1 __rm_path='' __rm_suffix='' __rm_parent __rm_resolved
-  normalize_mount_path __rm_path "$2"
-  if [[ "$__rm_path" == / ]]; then
-    printf -v "$__rm_out" '%s' /
-    return
-  fi
-  __rm_parent=${__rm_path%/*}
-  __rm_suffix="/${__rm_path##*/}"
-  while [[ -n "$__rm_parent" && ! -e "$__rm_parent" && ! -L "$__rm_parent" ]]; do
-    __rm_suffix="/${__rm_parent##*/}${__rm_suffix}"
-    __rm_parent=${__rm_parent%/*}
-  done
-  realpath_exact __rm_resolved "${__rm_parent:-/}" || runner_fail "Cannot resolve ancestor of $__rm_path"
-  if [[ ! -d "$__rm_resolved" || ! -x "$__rm_resolved" ]]; then
-    runner_fail "Cannot resolve ancestor of $__rm_path"
-  fi
-  [[ "$__rm_resolved" != / ]] || __rm_resolved=''
-  printf -v "$__rm_out" '%s' "${__rm_resolved}${__rm_suffix}"
-}
-
-# st_dev cannot detect same-filesystem bind mounts. mountinfo paths use octal
-# escapes, so compare decoded path boundaries rather than grepping for a prefix.
+# Detect separate or same-device bind mounts at or below any checked path.
+# Reads /proc/self/mountinfo-formatted text from stdin (decoding kernel \NNN escapes).
 check_mount_targets() {
   (( $# > 0 )) || runner_fail 'Mount check requires at least one path'
-  local id='' parent='' device='' root='' encoded='' extra='' target dir norm seen=0
-  local -a dirs=()
-  for dir in "$@"; do
-    normalize_mount_path norm "$dir"
-    dirs+=("$norm")
-  done
-  while IFS=' ' read -r id parent device root encoded extra; do
-    [[ -n "$encoded" && " $extra " == *' - '* ]] || runner_fail 'Malformed runner mount table'
-    decode_mount_path target "$encoded"
-    [[ "$target" == /* ]] || runner_fail 'Malformed runner mount table'
-    seen=1
-    for dir in "${dirs[@]}"; do
-      if [[ "$dir" == / || "$target" == "$dir" || "$target" == "$dir/"* ]]; then
-        runner_fail "Refusing mount at or below $dir: $target"
-      fi
-    done
-    id=''; parent=''; device=''; root=''; encoded=''; extra=''
-  done
-  [[ -z "${id}${parent}${device}${root}${encoded}${extra}" ]] || runner_fail 'Malformed runner mount table'
-  (( seen )) || runner_fail 'Empty runner mount table'
+  local py_check
+  read -r -d '' py_check <<'PY' || true
+import os, re, sys
+
+def unescape(s):
+    out = []
+    i = 0
+    while i < len(s):
+        if s[i] == '\\':
+            code = s[i + 1:i + 4]
+            if len(code) != 3 or not re.fullmatch(r'[0-3][0-7]{2}', code) or code == '000':
+                raise SystemExit('::error::Malformed runner mount table')
+            out.append(chr(int(code, 8)))
+            i += 4
+        else:
+            out.append(s[i])
+            i += 1
+    return ''.join(out)
+
+def canonical_targets(raw):
+    if not raw.startswith('/') or '//' in raw:
+        raise SystemExit(f'::error::Mount check path must be canonical: {raw}')
+    p = '/' if raw == '/' else raw.rstrip('/')
+    if any(seg in ('.', '..') for seg in p.split('/')[1:]):
+        raise SystemExit(f'::error::Mount check path must be canonical: {raw}')
+    result = [p]
+    if p != '/':
+        parent, suffix = os.path.dirname(p), ['/' + os.path.basename(p)]
+        while parent != '/' and not os.path.lexists(parent):
+            suffix.append('/' + os.path.basename(parent))
+            parent = os.path.dirname(parent)
+        real = os.path.realpath(parent)
+        if not os.path.isdir(real):
+            raise SystemExit(f'::error::Cannot resolve ancestor of {p}')
+        resolved = ('' if real == '/' else real) + ''.join(reversed(suffix))
+        if resolved != p:
+            result.append(resolved)
+    return result
+
+targets = []
+for arg in sys.argv[1:]:
+    targets.extend(canonical_targets(arg))
+
+data = sys.stdin.read()
+if not data or not data.endswith('\n'):
+    raise SystemExit('::error::Empty or malformed runner mount table')
+for line in data.splitlines():
+    parts = line.split(' ')
+    if len(parts) < 7 or '-' not in parts[5:]:
+        raise SystemExit('::error::Malformed runner mount table')
+    mount = unescape(parts[4])
+    if not mount.startswith('/'):
+        raise SystemExit('::error::Malformed runner mount table')
+    for target in targets:
+        if target == '/' or mount == target or mount.startswith(target + '/'):
+            raise SystemExit(f'::error::Refusing mount at or below {target}: {mount}')
+PY
+  /usr/bin/python3 -c "$py_check" "$@"
 }
 
 require_no_mount_targets() {
-  (( $# > 0 )) || runner_fail 'Mount check requires at least one path'
-  local arg norm resolved
-  local -a targets=()
-  for arg in "$@"; do
-    normalize_mount_path norm "$arg"
-    targets+=("$norm")
-    resolve_mount_parent resolved "$norm"
-    [[ "$resolved" == "$norm" ]] || targets+=("$resolved")
-  done
-  check_mount_targets "${targets[@]}" < /proc/self/mountinfo || runner_fail 'Cannot inspect runner mounts'
+  check_mount_targets "$@" < /proc/self/mountinfo
 }
