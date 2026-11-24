@@ -51,31 +51,43 @@ for dir in "${workdirs[@]}"; do
 done
 
 # Disable and remove any preinstalled file-backed swap on /mnt to reclaim relay space.
-while IFS= read -r -d '' swap_file; do
-  require_no_mount_targets "$swap_file"
-  sudo -n swapoff -- "$swap_file" < /dev/null
-  sudo -n rm -f -- "$swap_file" < /dev/null
-done < <(/usr/bin/python3 - "$relay_device" <<'PY'
+exec {swap_fd}< <(/usr/bin/python3 - "$relay_device" <<'PY'
 import os, re, stat, sys
 relay_dev = int(sys.argv[1])
-with open('/proc/swaps', encoding='utf-8') as f:
-    lines = f.read().splitlines()[1:]
-for line in lines:
+with open('/proc/swaps', 'rb') as f:
+    data = f.read()
+if not data or not data.endswith(b'\n'):
+    raise SystemExit('Malformed /proc/swaps')
+for line in data.splitlines()[1:]:
     cols = line.split()
-    if len(cols) < 2 or cols[1] != 'file':
+    if len(cols) < 2 or cols[1] != b'file':
         continue
-    path = re.sub(r'\\([0-3][0-7]{2})', lambda m: chr(int(m[1], 8)), cols[0])
-    if not path.startswith('/mnt/'):
+    path = re.sub(rb'\\([0-3][0-7]{2})', lambda m: bytes([int(m[1], 8)]), cols[0])
+    if b'\x00' in path or not path.startswith(b'/mnt/'):
         continue
     try:
         st = os.lstat(path)
+        real = os.path.realpath(path, strict=True)
     except OSError:
         continue
-    real = os.path.realpath(path)
-    if stat.S_ISREG(st.st_mode) and real.startswith('/mnt/') and st.st_dev == relay_dev:
-        sys.stdout.buffer.write(real.encode('utf-8') + b'\0')
+    if stat.S_ISREG(st.st_mode) and real.startswith(b'/mnt/') and st.st_dev == relay_dev:
+        sys.stdout.buffer.write(real + b'\0')
 PY
 )
+swap_pid=$!
+while IFS= read -r -d '' swap_file <&"$swap_fd"; do
+  swap_checks=("$swap_file")
+  swap_parent=${swap_file%/*}
+  while [[ "$swap_parent" == /mnt/* ]]; do
+    swap_checks+=("$swap_parent")
+    swap_parent=${swap_parent%/*}
+  done
+  require_no_mount_targets "${swap_checks[@]}"
+  sudo -n swapoff -- "$swap_file" < /dev/null
+  sudo -n rm -f -- "$swap_file" < /dev/null
+done
+exec {swap_fd}<&-
+wait "$swap_pid" || runner_fail 'Cannot inspect active runner swaps'
 
 cleanup_failed=0
 for pid in "${cleanup[@]}"; do
