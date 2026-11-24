@@ -16,10 +16,14 @@ apk="$inspection/ChromePublic.apk"
 build_tools_root="$CR_ROOT/src/third_party/android_sdk/public/build-tools"
 [[ -d "$build_tools_root" ]] || fail 'Chromium-managed Android build-tools directory missing'
 apksigner=''
-while IFS= read -r -d '' candidate; do
+exec {bt_fd}< <(find -H "$build_tools_root" -mindepth 2 -maxdepth 2 -name apksigner -xtype f -executable -print0 | sort -zV)
+bt_pid=$!
+while IFS= read -r -d '' candidate <&"$bt_fd"; do
   dir_name=${candidate%/apksigner}
   [[ "${dir_name##*/}" == .* ]] || apksigner=$candidate
-done < <(find -H "$build_tools_root" -mindepth 2 -maxdepth 2 -name apksigner -xtype f -executable -print0 | sort -zV)
+done
+exec {bt_fd}<&-
+wait "$bt_pid" || fail 'Failed to scan Chromium-managed Android build-tools'
 [[ -n "$apksigner" ]] || fail 'Chromium-managed Android build-tools apksigner missing'
 build_tools_dir=${apksigner%/apksigner}
 
@@ -54,8 +58,9 @@ ln -- "$apk" "$release/Chromium-Stable-arm64.apk"
 
 # Reject hidden files or symlinks inside metadata/ (upload-artifact omits hidden files).
 [[ -d "$CR_ROOT/metadata" && ! -L "$CR_ROOT/metadata" ]] || fail 'Build metadata directory missing'
-bad_meta=$(find "$CR_ROOT/metadata" -mindepth 1 \( -name '.*' -o ! \( -type f -o -type d \) \) -printf x -quit)
-[[ -z "$bad_meta" ]] || fail 'Build metadata contains hidden or non-regular entries'
+bad_meta=$(LC_ALL=C find "$CR_ROOT/metadata" -mindepth 1 \
+  \( -name '.*' -o -name '*[![:alnum:]_.-]*' -o ! \( -type f -o -type d \) \) -printf x -quit)
+[[ -z "$bad_meta" ]] || fail 'Build metadata contains hidden, unsafe, or non-regular entries'
 cp -a "$CR_ROOT/metadata" "$release/metadata"
 
 # Corruption-detection checksums (not cryptographic authentication).

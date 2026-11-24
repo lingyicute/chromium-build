@@ -65,11 +65,12 @@ def inspect_zip(apk_path):
     with zipfile.ZipFile(apk_path) as zf:
         entries = zf.infolist()
         names = {info.filename: info for info in entries}
-        if len(names) != len(entries):
-            raise ValueError('APK contains duplicate ZIP entry names')
+        if len(names) != len(entries) or any(info.filename != info.orig_filename for info in entries):
+            raise ValueError('APK contains duplicate or ambiguous ZIP entry names')
         for name, info in names.items():
             trimmed = name[:-1] if info.is_dir() else name
             if (not trimmed or name.startswith('/') or '\\' in name
+                    or any(ord(ch) < 0x20 or ord(ch) == 0x7f for ch in name)
                     or any(part in ('', '.', '..') for part in trimmed.split('/'))):
                 raise ValueError(f'APK contains unsafe ZIP entry path: {name!r}')
         for required in ('AndroidManifest.xml', 'classes.dex'):
@@ -159,32 +160,40 @@ def inspect_apk(apk_path, lock_path, aapt2, log, pin, meta_out):
     meta_out.write_text(json.dumps(meta) + '\n', encoding='utf-8')
 
 
+def _clean_md(value):
+    return str(value).replace('`', '').replace('\r', ' ').replace('\n', ' ').strip() or '-'
+
+
 def write_summary(release, meta_path, summary_path):
     try:
         meta = json.loads(meta_path.read_text(encoding='utf-8'))
         lock = json.loads((release / 'metadata/build-lock.json').read_text(encoding='utf-8'))
         apk_path = release / 'Chromium-Stable-arm64.apk'
         apk_sha = next(
-            line.split('  ', 1)[0]
+            parts[0]
             for line in (release / 'SHA256SUMS').read_text(encoding='utf-8').splitlines()
-            if line.endswith('  Chromium-Stable-arm64.apk')
+            for parts in (line.split('  ', 1),)
+            if len(parts) == 2 and parts[1] == 'Chromium-Stable-arm64.apk'
         )
-        details = [f"{label} `{meta[key]}`" for key, label in (
+        details = [f"{label} `{_clean_md(meta[key])}`" for key, label in (
             ('version_code', 'versionCode'), ('min_sdk', 'minSdk'), ('target_sdk', 'targetSdk'))
             if meta.get(key)]
         lines = [
             '### Built Chromium Android arm64 APK',
-            f"- Version: `{lock['version']}` (`{lock['chromium_revision'][:12]}`)",
-            f"- Package: `{meta['package']}`" + (f" ({', '.join(details)})" if details else ''),
+            f"- Version: `{_clean_md(lock['version'])}` (`{_clean_md(lock['chromium_revision'][:12])}`)",
+            f"- Package: `{_clean_md(meta['package'])}`" + (f" ({', '.join(details)})" if details else ''),
             f"- APK size: `{apk_path.stat().st_size:,}` bytes",
-            f'- APK SHA-256: `{apk_sha}`',
+            f'- APK SHA-256: `{_clean_md(apk_sha)}`',
         ]
         runners = release / 'metadata/runners.jsonl'
         if runners.is_file():
             recs = [json.loads(line) for line in runners.read_text(encoding='utf-8').splitlines() if line.strip()]
             if recs:
-                mins = sum(r.get('elapsed_seconds', 0) for r in recs if isinstance(r, dict)) / 60
-                lines.append(f'- Compile stages: `{len(recs)}` ({mins:.1f} min total compile)')
+                total_sec = sum(
+                    r.get('elapsed_seconds') or 0 for r in recs
+                    if isinstance(r, dict) and not isinstance(r.get('elapsed_seconds'), bool)
+                )
+                lines.append(f'- Compile stages: `{len(recs)}` ({total_sec / 60:.1f} min total compile)')
         lines.append('- Signing: upstream development signing key; NOT production-signed.')
         with summary_path.open('a', encoding='utf-8') as f:
             f.write('\n'.join(lines) + '\n')
