@@ -5,10 +5,13 @@ import json
 import os
 from pathlib import Path
 import subprocess
+import sys
 import tempfile
 import unittest
 import zipfile
 
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / '.github/scripts'))
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPTS = ROOT / '.github/scripts'

@@ -8,16 +8,16 @@ import math
 import os
 from pathlib import Path
 import re
-import stat
 import sys
 import time
 import urllib.error
 import urllib.parse
 import urllib.request
 
+from files import MAX_BYTES, write_regular_bytes as _write_regular_bytes
+
 URL = 'https://chromiumdash.appspot.com/fetch_releases?channel=Stable&platform=Android&num=1'
 SOURCE = 'https://chromium.googlesource.com/chromium/src.git'
-MAX_BYTES = 1024 * 1024
 FETCH_ATTEMPTS = 3
 RETRY_BASE_SECONDS = 2.0
 RETRYABLE_HTTP_CODES = frozenset({408, 429})
@@ -240,25 +240,6 @@ def fetch_release_json(url=URL, timeout=90, attempts=FETCH_ATTEMPTS,
         if delay > 0:
             time.sleep(delay)
     raise last_error
-
-
-def _write_regular_bytes(path, data):
-    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_NOFOLLOW | os.O_NONBLOCK, 0o644)
-    try:
-        st = os.fstat(fd)
-        if not stat.S_ISREG(st.st_mode):
-            raise ValueError(f'Expected regular file: {path.name}')
-        os.set_blocking(fd, True)
-        os.ftruncate(fd, 0)
-        view = memoryview(data)
-        written = 0
-        while written < len(view):
-            n = os.write(fd, view[written:])
-            if n <= 0:
-                raise OSError(f'Short write to {path.name}')
-            written += n
-    finally:
-        os.close(fd)
 
 
 def main():

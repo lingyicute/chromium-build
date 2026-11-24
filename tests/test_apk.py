@@ -11,6 +11,8 @@ import unittest
 from unittest import mock
 
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / '.github/scripts'))
+
 SCRIPT = Path(__file__).resolve().parents[1] / '.github/scripts/apk.py'
 SPEC = importlib.util.spec_from_file_location('apk', SCRIPT)
 apk = importlib.util.module_from_spec(SPEC)

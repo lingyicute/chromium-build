@@ -10,6 +10,8 @@ import stat
 import sys
 import time
 
+from files import open_regular_file
+
 CHUNK_SIZE = 1024 * 1024 * 1024  # 1 GiB
 IO_BUFFER = 8 * 1024 * 1024      # 8 MiB
 MAX_PARTS = 100000
@@ -60,21 +62,10 @@ def parts(directory):
 
 
 def _open_regular_ro(path):
-    # If a regular file was replaced by a FIFO, fail fstat instead of blocking.
-    flags = os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW
     try:
-        fd = os.open(path, flags)
-    except OSError as exc:
+        return open_regular_file(path)
+    except (OSError, ValueError) as exc:
         raise ValueError(BAD_LAYOUT) from exc
-    try:
-        st = os.fstat(fd)
-        if not stat.S_ISREG(st.st_mode):
-            raise ValueError(BAD_LAYOUT)
-        os.set_blocking(fd, True)
-        return os.fdopen(fd, 'rb')
-    except BaseException:
-        os.close(fd)
-        raise
 
 
 def _read_exact(stream, buf):

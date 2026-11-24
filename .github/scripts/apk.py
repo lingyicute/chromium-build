@@ -11,66 +11,14 @@ import tempfile
 import zipfile
 
 
-MAX_LOCK_BYTES = 1024 * 1024
-VERSION_PATTERN = re.compile(r'(?:0|[1-9][0-9]{0,3})(?:\.(?:0|[1-9][0-9]{0,5})){3}')
+from files import (open_regular_file as _open_regular_ro, read_bounded_bytes,
+                   write_regular_bytes as _write_regular_bytes)
+from resolve import VERSION_PATTERN, parse_release_json
 PACKAGE_ATTR = r"[a-zA-Z][a-zA-Z0-9]*='[^']*'"
 
 
-def _open_regular_ro(path):
-    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
-    try:
-        return os.fdopen(fd, 'rb')
-    except BaseException:
-        os.close(fd)
-        raise
-
-
-def _write_regular_bytes(path, data):
-    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_NOFOLLOW | os.O_NONBLOCK, 0o644)
-    try:
-        st = os.fstat(fd)
-        if not stat.S_ISREG(st.st_mode):
-            raise ValueError(f'Expected regular file: {path.name}')
-        os.set_blocking(fd, True)
-        os.ftruncate(fd, 0)
-        view = memoryview(data)
-        written = 0
-        while written < len(view):
-            n = os.write(fd, view[written:])
-            if n <= 0:
-                raise OSError(f'Short write to {path.name}')
-            written += n
-    finally:
-        os.close(fd)
-
-
-def _read_bounded_text(path, encoding, label):
-    with _open_regular_ro(path) as src:
-        st = os.fstat(src.fileno())
-        if not stat.S_ISREG(st.st_mode):
-            raise ValueError(f'{label} must be a regular file')
-        os.set_blocking(src.fileno(), True)
-        raw = src.read(MAX_LOCK_BYTES + 1)
-    if len(raw) > MAX_LOCK_BYTES:
-        raise ValueError(f'Oversized {label}')
-    return raw.decode(encoding)
-
-
 def _read_lock_version(lock_path):
-    text = _read_bounded_text(lock_path, 'utf-8', 'build-lock.json')
-
-    def _reject_constant(token):
-        raise ValueError(f'Invalid JSON constant in build-lock.json: {token}')
-
-    def _unique_object(pairs):
-        obj = {}
-        for key, value in pairs:
-            if key in obj:
-                raise ValueError('Duplicate field in build-lock.json')
-            obj[key] = value
-        return obj
-
-    lock = json.loads(text, parse_constant=_reject_constant, object_pairs_hook=_unique_object)
+    lock = parse_release_json(read_bounded_bytes(lock_path))
     if not isinstance(lock, dict):
         raise ValueError('Invalid build-lock.json')
     version = lock.get('version')
@@ -85,9 +33,8 @@ def stage_apk(root, source, destination):
     # Do not follow a symlink (or block opening a FIFO) in place of the APK.
     with _open_regular_ro(source) as src:
         before = os.fstat(src.fileno())
-        if not stat.S_ISREG(before.st_mode) or before.st_size <= 0:
+        if before.st_size <= 0:
             raise ValueError('Expected a nonempty regular ChromePublic.apk')
-        os.set_blocking(src.fileno(), True)
         opened_path = Path(f'/proc/self/fd/{src.fileno()}').resolve(strict=True)
         if not opened_path.is_relative_to(root.resolve(strict=True)):
             raise ValueError('ChromePublic.apk resolves outside the build tree')
@@ -113,10 +60,10 @@ def stage_apk(root, source, destination):
 
 
 def inspect_signer(log, pin):
-    expected = _read_bounded_text(pin, 'ascii', 'certificate SHA-256 pin').strip()
+    expected = read_bounded_bytes(pin).decode('ascii').strip()
     if not re.fullmatch(r'[0-9a-f]{64}', expected):
         raise ValueError('Invalid development certificate SHA-256 pin')
-    trace = _read_bounded_text(log, 'utf-8', 'apksigner log')
+    trace = read_bounded_bytes(log).decode('utf-8')
     count_lines = re.findall(r'^Number of signers:[^\r\n]*$', trace, re.M)
     counts = re.findall(r'^Number of signers: ([0-9]+)[ \t]*\r?$', trace, re.M)
     digest_lines = re.findall(r'^[^\r\n]*certificate SHA-256 digest:[^\r\n]*$', trace, re.M)
@@ -151,10 +98,6 @@ def _validate_dex(zf, info):
 
 def inspect_zip(apk_path):
     with _open_regular_ro(apk_path) as apk_file:
-        st = os.fstat(apk_file.fileno())
-        if not stat.S_ISREG(st.st_mode):
-            raise ValueError('APK must be a regular file')
-        os.set_blocking(apk_file.fileno(), True)
         with zipfile.ZipFile(apk_file) as zf:
             entries = zf.infolist()
             names = {info.filename: info for info in entries}
@@ -210,8 +153,7 @@ def inspect_badging(aapt2, apk_path, locked_version):
     if not (aapt2.is_file() and os.access(aapt2, os.X_OK)):
         raise ValueError('Chromium-managed Android build-tools aapt2 missing')
     with _open_regular_ro(apk_path) as apk_file:
-        if not stat.S_ISREG(os.fstat(apk_file.fileno()).st_mode):
-            raise ValueError('APK must be a regular file')
+        pass
     badging = subprocess.check_output([str(aapt2), 'dump', 'badging', str(apk_path)],
                                       text=True, encoding='utf-8')
     package_lines = re.findall(r'^package:([^\r\n]*)\r?$', badging, re.M)

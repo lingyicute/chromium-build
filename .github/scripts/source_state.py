@@ -3,44 +3,15 @@
 import os
 from pathlib import Path
 import re
-import stat
 import subprocess
 import sys
 
+from files import open_regular_file, read_bounded_bytes
 from resolve import MAX_BYTES, SOURCE, URL, VERSION_PATTERN, parse_release_json, validate, validate_run_metadata
 
 
 REVISION = re.compile(r'[0-9a-f]{40}')
 VERSION_FIELDS = ('MAJOR', 'MINOR', 'BUILD', 'PATCH')
-
-
-def open_regular_file(path, root=None):
-    if root is not None:
-        if root.is_symlink() or not root.is_dir():
-            raise ValueError('Build root must be a real directory')
-        resolved_root = root.resolve(strict=True)
-    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
-    try:
-        st = os.fstat(fd)
-        if not stat.S_ISREG(st.st_mode):
-            raise ValueError(f'Expected regular file: {path.name}')
-        if root is not None:
-            opened = Path(f'/proc/self/fd/{fd}').resolve(strict=True)
-            if not opened.is_relative_to(resolved_root):
-                raise ValueError(f'Path resolves outside build tree: {path.name}')
-        os.set_blocking(fd, True)
-        return os.fdopen(fd, 'rb')
-    except BaseException:
-        os.close(fd)
-        raise
-
-
-def read_bounded_bytes(path, limit=MAX_BYTES, root=None):
-    with open_regular_file(path, root=root) as source:
-        raw = source.read(limit + 1)
-    if len(raw) > limit:
-        raise ValueError(f'Oversized build metadata: {path.name}')
-    return raw
 
 
 def read_metadata_json(path, root=None):
