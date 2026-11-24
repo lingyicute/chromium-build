@@ -107,85 +107,73 @@ jobs:
         run: |
           /usr/bin/python3 - <<'PY'
           import json, os, re, sys
-          from collections import namedtuple
 
-          order = ['prepare'] + [f'part-{i:02d}' for i in range(1, 9)]
-          output_keys = ('status', 'artifact-id', 'apk-id', 'sha256')
-          Stage = namedtuple('Stage', 'result status checkpoint apk sha256')
-
-          def text(value, default=''):
-              return value if isinstance(value, str) and value else default
-
-          raw_needs = json.loads(os.environ['NEEDS_JSON'])
-          needs = raw_needs if isinstance(raw_needs, dict) else {}
+          order = ['prepare', *(f'part-{i:02d}' for i in range(1, 9))]
+          needs = json.loads(os.environ['NEEDS_JSON'])
           stages = {}
           for name in order:
-              job = needs.get(name)
-              job = job if isinstance(job, dict) else {}
-              outputs = job.get('outputs')
-              outputs = outputs if isinstance(outputs, dict) else {}
-              stages[name] = Stage(text(job.get('result'), 'unknown'),
-                                   *(text(outputs.get(key)) for key in output_keys))
+              job = needs.get(name) or {}
+              out = job.get('outputs') or {}
+              stages[name] = (
+                  job.get('result') or 'unknown',
+                  out.get('status') or '',
+                  out.get('artifact-id') or '',
+                  out.get('apk-id') or '',
+                  out.get('sha256') or '',
+              )
 
-          def valid_artifact_id(value):
-              return bool(re.fullmatch(r'[1-9][0-9]{0,15}', value) and int(value) <= 9007199254740991)
+          def valid_id(v):
+              return bool(re.fullmatch(r'[1-9][0-9]{0,15}', v) and int(v) <= 9007199254740991)
 
-          def clean_skipped(name):
-              return stages[name] == Stage('skipped', '', '', '', '')
+          def is_skipped(n):
+              return stages[n] == ('skipped', '', '', '', '')
 
-          def successful_checkpoint(name):
-              stage = stages[name]
-              return (stage.result == 'success' and stage.status == 'running'
-                      and valid_artifact_id(stage.checkpoint) and not stage.apk
-                      and re.fullmatch(r'[0-9a-f]{64}', stage.sha256) is not None)
+          def is_checkpoint(n):
+              res, status, ckpt, apk, sha = stages[n]
+              return (res == 'success' and status == 'running' and valid_id(ckpt)
+                      and not apk and bool(re.fullmatch(r'[0-9a-f]{64}', sha)))
 
-          def cell(text):
-              return text.replace('`', '').replace('|', '/').replace('\r', ' ').replace('\n', ' ').strip() or '-'
-
-          errors = [name for name in order if stages[name].result in ('failure', 'cancelled')]
-          completed = [name for name in order if stages[name].status == 'completed']
-          exhausted = (stages[order[-1]] == Stage('success', 'exhausted', '', '', '')
-                       and all(successful_checkpoint(n) for n in order[:-1]))
-          valid_completion_chain = ok = False
+          errors = [n for n in order if stages[n][0] in ('failure', 'cancelled')]
+          completed = [n for n in order if stages[n][1] == 'completed']
+          chain_ok = ok = False
           if len(completed) == 1:
-              name = completed[0]
-              idx = order.index(name)
-              stage = stages[name]
-              valid_completion_chain = (not stage.checkpoint and not stage.sha256
-                                        and all(successful_checkpoint(n) for n in order[:idx])
-                                        and all(clean_skipped(n) for n in order[idx + 1:]))
-              ok = valid_completion_chain and stage.result == 'success' and valid_artifact_id(stage.apk)
+              done = completed[0]
+              idx = order.index(done)
+              res, _, ckpt, apk, sha = stages[done]
+              chain_ok = (not ckpt and not sha
+                          and all(is_checkpoint(n) for n in order[:idx])
+                          and all(is_skipped(n) for n in order[idx + 1:]))
+              ok = chain_ok and res == 'success' and valid_id(apk)
 
           if ok:
               reason = f'APK completed in `{completed[0]}`; see the `apk-*` artifact.'
-          elif all(clean_skipped(n) for n in order):
+          elif all(is_skipped(n) for n in order):
               reason = 'FAILED: `prepare` was skipped (workflow may only run from the default branch).'
           elif len(completed) > 1:
-              reason = 'FAILED: multiple stages reported `completed`: ' + ', '.join(completed) + '.'
-          elif valid_completion_chain and stages[completed[0]].result == 'cancelled':
+              reason = f"FAILED: multiple stages reported `completed`: {', '.join(completed)}."
+          elif chain_ok and stages[completed[0]][0] == 'cancelled':
               reason = f'FAILED: `{completed[0]}` was cancelled after building the APK, before publication completed.'
-          elif valid_completion_chain and stages[completed[0]].result == 'failure':
+          elif chain_ok and stages[completed[0]][0] == 'failure':
               reason = (f'FAILED: `{completed[0]}` built the APK, but verifying or uploading it failed; '
                         'an `unverified-apk-*` artifact may remain, for inspection only.')
           elif errors:
-              reason = 'FAILED: required stage(s) failed or were cancelled: ' + ', '.join(errors) + '.'
-          elif valid_completion_chain and not valid_artifact_id(stages[completed[0]].apk):
-              reason = f'FAILED: `{completed[0]}` reported completion without a confirmed APK artifact.'
-          elif exhausted:
+              reason = f"FAILED: stage(s) failed or were cancelled: {', '.join(errors)}."
+          elif chain_ok and not valid_id(stages[completed[0]][3]):
+              reason = f'FAILED: `{completed[0]}` completed without a confirmed APK artifact.'
+          elif stages[order[-1]] == ('success', 'exhausted', '', '', '') and all(is_checkpoint(n) for n in order[:-1]):
               reason = 'FAILED: prepare and all 8 build stages ran without finishing; stage budget was exhausted.'
           else:
               reason = 'FAILED: no stage produced a validly completed APK. Inspect stage logs.'
 
           summary = os.environ.get('GITHUB_STEP_SUMMARY')
           if summary:
+              rows = '\n'.join(f"| `{n}` | `{stages[n][0]}` | `{stages[n][1] or '-'}` |" for n in order)
+              text = (f'## Chromium Stable Android arm64\n{reason}\n\n'
+                      f'| Stage | Result | Output status |\n|---|---|---|\n{rows}\n\n'
+                      'Development signing key only. Not a production release.\n')
               try:
                   with open(summary, 'a', encoding='utf-8') as f:
-                      f.write('## Chromium Stable Android arm64\n')
-                      f.write(reason + '\n\n')
-                      f.write('| Stage | Result | Output status |\n|---|---|---|\n')
-                      for name in order:
-                          f.write(f"| `{name}` | `{cell(stages[name].result)}` | `{cell(stages[name].status or '-')}` |\n")
-                      f.write('\nDevelopment signing key only. Not a production release.\n')
+                      f.write(text)
               except OSError as exc:
                   print(f'::warning::Failed to append result summary: {exc}', file=sys.stderr)
           if not ok:
